@@ -18,6 +18,7 @@ const checkoutSchema=z.object({
   })).min(1).max(50)
 });
 const chatSchema=z.object({body:z.string().trim().min(1).max(2000)});
+const messageReadSchema=z.object({throughMessageId:z.string().regex(/^[a-f\d]{24}$/i)});
 const paymentSchema=z.object({utr:paymentReferenceSchema});
 const billSchema=z.object({
   regionId:z.string().regex(/^[a-f\d]{24}$/i),
@@ -438,12 +439,26 @@ async function sendOrderAcceptedMessage(order,senderName){
   }
 }
 
-async function listMessages(order,res,readerRole){
+async function listMessages(order,res){
   const messages=await OrderMessage.find({businessId:order.businessId,orderId:order._id,kind:"TEXT"}).sort({createdAt:-1}).limit(200).lean();
   messages.reverse();
-  const unreadField=readerRole==="BUSINESS_OWNER"?"unreadBusinessMessages":"unreadCustomerMessages";
-  if(order[unreadField]>0)await Order.updateOne({_id:order._id,businessId:order.businessId},{$set:{[unreadField]:0}});
   res.json({messages});
+}
+async function markMessagesRead(order,req,res,readerRole){
+  const parsed=messageReadSchema.safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({message:"Refresh the conversation before marking messages as read."});
+  const {throughMessageId}=parsed.data;
+  const latestMessage=await OrderMessage.findOne({businessId:order.businessId,orderId:order._id,kind:"TEXT"})
+    .sort({createdAt:-1,_id:-1}).select("_id").lean();
+  if(String(latestMessage?._id||"")!==throughMessageId)return res.json({markedRead:false});
+  const unreadField=readerRole==="BUSINESS_OWNER"?"unreadBusinessMessages":"unreadCustomerMessages";
+  const unreadCount=Number(order[unreadField]||0);
+  if(unreadCount===0)return res.json({markedRead:true});
+  const result=await Order.updateOne(
+    {_id:order._id,businessId:order.businessId,[unreadField]:unreadCount},
+    {$set:{[unreadField]:0}}
+  );
+  res.json({markedRead:result.modifiedCount===1});
 }
 async function createMessage(order,{senderRole,senderName,body},res){
   const parsed=chatSchema.safeParse({body});
@@ -457,7 +472,12 @@ async function createMessage(order,{senderRole,senderName,body},res){
 export async function getCustomerOrderMessages(req,res){
   const order=await findCustomerOrder(req,res);
   if(!order||res.headersSent)return;
-  await listMessages(order,res,"CUSTOMER");
+  await listMessages(order,res);
+}
+export async function markCustomerOrderMessagesRead(req,res){
+  const order=await findCustomerOrder(req,res);
+  if(!order||res.headersSent)return;
+  await markMessagesRead(order,req,res,"CUSTOMER");
 }
 export async function submitCustomerPaymentProof(req,res){
   const order=await findCustomerOrder(req,res);
@@ -515,7 +535,12 @@ export async function createCustomerOrderMessage(req,res){
 export async function getBusinessOrderMessages(req,res){
   const order=await Order.findOne({_id:req.params.id,businessId:req.tenantId});
   if(!order)return res.status(404).json({message:"Order not found in your store."});
-  await listMessages(order,res,"BUSINESS_OWNER");
+  await listMessages(order,res);
+}
+export async function markBusinessOrderMessagesRead(req,res){
+  const order=await Order.findOne({_id:req.params.id,businessId:req.tenantId});
+  if(!order)return res.status(404).json({message:"Order not found in your store."});
+  await markMessagesRead(order,req,res,"BUSINESS_OWNER");
 }
 export async function createBusinessOrderMessage(req,res){
   const order=await Order.findOne({_id:req.params.id,businessId:req.tenantId});

@@ -5,7 +5,7 @@ import {createProduct,createSliderSlide,deleteProduct,deleteSliderSlide,getPubli
 import {createCustomerRecoveryRequest,deleteCustomerProfile,getCustomerSession,loginCustomer,logoutCustomer,registerCustomer,updateCustomerProfile} from "../controllers/customerAuthController.js";
 import {asyncHandler} from "../middleware/asyncHandler.js";
 import {optionalCustomerAuth,requireActiveBusiness,requireAuth,requireCustomerAuth} from "../middleware/auth.js";
-import {archiveBusinessOrder,archiveCustomerOrder,createBusinessOrderMessage,createCustomerOrder,createCustomerOrderMessage,getBusinessOrderAnalytics,getBusinessOrderMessages,getBusinessPaymentProof,getCustomerOrder,getCustomerOrderMessages,listBusinessOrders,listCustomerOrders,customerOrderAccess,reviewBusinessPayment,sendBusinessOrderBill,submitCustomerPaymentProof,updateBusinessOrderStatus} from "../controllers/orderController.js";
+import {archiveBusinessOrder,archiveCustomerOrder,createBusinessOrderMessage,createCustomerOrder,createCustomerOrderMessage,getBusinessOrderAnalytics,getBusinessOrderMessages,getBusinessPaymentProof,getCustomerOrder,getCustomerOrderMessages,listBusinessOrders,listCustomerOrders,customerOrderAccess,markBusinessOrderMessagesRead,markCustomerOrderMessagesRead,reviewBusinessPayment,sendBusinessOrderBill,submitCustomerPaymentProof,updateBusinessOrderStatus} from "../controllers/orderController.js";
 import {createBusinessSupport,getBusinessInboxCounts,getBusinessSupport,getCustomerInboxCounts,listBusinessSupport,replyBusinessSupport} from "../controllers/supportController.js";
 import {getPincodeDetails,getPincodeRegions} from "../controllers/shippingController.js";
 
@@ -35,10 +35,12 @@ router.post("/stores/:slug/orders",publicOrderWriteLimit,requireCustomerAuth,asy
 router.get("/stores/:slug/orders/:orderNumber",optionalCustomerAuth,customerOrderAccess,asyncHandler(getCustomerOrder));
 router.get("/stores/:slug/orders/:orderNumber/chat",optionalCustomerAuth,customerOrderAccess,asyncHandler(getCustomerOrderMessages));
 router.post("/stores/:slug/orders/:orderNumber/chat",publicOrderWriteLimit,optionalCustomerAuth,customerOrderAccess,asyncHandler(createCustomerOrderMessage));
+router.post("/stores/:slug/orders/:orderNumber/chat/read",optionalCustomerAuth,customerOrderAccess,asyncHandler(markCustomerOrderMessagesRead));
 router.post("/stores/:slug/orders/:orderNumber/payment-proof",publicOrderWriteLimit,optionalCustomerAuth,customerOrderAccess,imageUpload.single("proof"),asyncHandler(submitCustomerPaymentProof));
 router.get("/orders/:orderNumber",customerOrderAccess,asyncHandler(getCustomerOrder));
 router.get("/orders/:orderNumber/chat",customerOrderAccess,asyncHandler(getCustomerOrderMessages));
 router.post("/orders/:orderNumber/chat",publicOrderWriteLimit,customerOrderAccess,asyncHandler(createCustomerOrderMessage));
+router.post("/orders/:orderNumber/chat/read",customerOrderAccess,asyncHandler(markCustomerOrderMessagesRead));
 router.post("/orders/:orderNumber/payment-proof",publicOrderWriteLimit,customerOrderAccess,imageUpload.single("proof"),asyncHandler(submitCustomerPaymentProof));
 
 router.use("/business",requireAuth,requireActiveBusiness);
@@ -65,6 +67,7 @@ router.get("/business/orders/:id/payment-proof",asyncHandler(getBusinessPaymentP
 router.patch("/business/orders/:id/payment-status",asyncHandler(reviewBusinessPayment));
 router.get("/business/orders/:id/chat",asyncHandler(getBusinessOrderMessages));
 router.post("/business/orders/:id/chat",asyncHandler(createBusinessOrderMessage));
+router.post("/business/orders/:id/chat/read",asyncHandler(markBusinessOrderMessagesRead));
 router.post("/business/slides",imageUpload.single("image"),asyncHandler(createSliderSlide));
 router.patch("/business/slides/:id",imageUpload.single("image"),asyncHandler(updateSliderSlide));
 router.delete("/business/slides/:id",asyncHandler(deleteSliderSlide));
