@@ -7,6 +7,7 @@ import {deleteStoreImage,uploadStoreImage} from "../services/cloudinary.js";
 import {findPincodeDetails} from "../services/pincodeDirectory.js";
 import {canAddProduct,canAddSlide,getPlan} from "../utils/businessPlans.js";
 import {uniqueBusinessSlug} from "../utils/slug.js";
+import {getBusinessPaymentMethod} from "../utils/businessPaymentMethod.js";
 
 const optionalNumber=maximum=>z.preprocess(value=>value===""||value==null?undefined:value,z.coerce.number().positive().max(maximum).optional());
 const optionalInteger=maximum=>z.preprocess(value=>value===""||value==null?undefined:value,z.coerce.number().int().positive().max(maximum).optional());
@@ -70,9 +71,10 @@ const businessProfileFields=z.object({
   removeLogo:z.boolean().optional().default(false)
 });
 const paymentSettingsFields=z.object({
+  paymentMethod:z.enum(["QR","GPAY","OFF"]).optional(),
   upiId:z.string().trim().max(120).optional().default(""),
   paymentInstructions:z.string().trim().max(500).optional().default(""),
-  paymentQrEnabled:z.boolean().optional().default(true),
+  paymentQrEnabled:z.boolean().optional(),
   removePaymentQr:z.boolean().optional().default(false)
 });
 const storeSectionsSchema=z.object({
@@ -116,7 +118,8 @@ function storeAnnouncements(business){
 }
 function safeBusiness(business){
   const plan=getPlan(business.subscriptionPlan);
-  return {id:business._id,name:business.name,slug:business.slug,category:business.category,description:business.description,announcementTitle:business.announcementTitle||"",announcementText:business.announcementText||"",announcements:storeAnnouncements(business),storeSections:business.storeSections||[],logoUrl:business.logoUrl,contactPhone:business.contactPhone||"",whatsappNumber:business.whatsappNumber||"",instagramUrl:business.instagramUrl||"",youtubeUrl:business.youtubeUrl||"",facebookUrl:business.facebookUrl||"",linkedinUrl:business.linkedinUrl||"",twitterUrl:business.twitterUrl||"",telegramUrl:business.telegramUrl||"",seoTitle:business.seoTitle||"",seoDescription:business.seoDescription||"",upiId:business.upiId,paymentInstructions:business.paymentInstructions,paymentQrUrl:business.paymentQrUrl,paymentQrEnabled:business.paymentQrEnabled!==false,address:business.address,city:business.city,state:business.state,pincode:business.pincode,deliveryRegions:business.deliveryRegions||[],status:business.status,subscriptionPlan:plan.id,subscriptionFeatures:business.subscriptionFeatures||{},planLimits:{maxProducts:plan.maxProducts,maxSlides:plan.maxSlides,monthlyPriceInr:plan.monthlyPriceInr},sliderSlides:business.sliderSlides};
+  const paymentMethod=getBusinessPaymentMethod(business);
+  return {id:business._id,name:business.name,slug:business.slug,category:business.category,description:business.description,announcementTitle:business.announcementTitle||"",announcementText:business.announcementText||"",announcements:storeAnnouncements(business),storeSections:business.storeSections||[],logoUrl:business.logoUrl,contactPhone:business.contactPhone||"",whatsappNumber:business.whatsappNumber||"",instagramUrl:business.instagramUrl||"",youtubeUrl:business.youtubeUrl||"",facebookUrl:business.facebookUrl||"",linkedinUrl:business.linkedinUrl||"",twitterUrl:business.twitterUrl||"",telegramUrl:business.telegramUrl||"",seoTitle:business.seoTitle||"",seoDescription:business.seoDescription||"",upiId:business.upiId,paymentMethod,paymentInstructions:business.paymentInstructions,paymentQrUrl:business.paymentQrUrl,paymentQrEnabled:paymentMethod==="QR",address:business.address,city:business.city,state:business.state,pincode:business.pincode,deliveryRegions:business.deliveryRegions||[],status:business.status,subscriptionPlan:plan.id,subscriptionFeatures:business.subscriptionFeatures||{},planLimits:{maxProducts:plan.maxProducts,maxSlides:plan.maxSlides,monthlyPriceInr:plan.monthlyPriceInr},sliderSlides:business.sliderSlides};
 }
 async function getOwnerBusiness(req){
   const business=await Business.findOne({_id:req.tenantId,ownerId:req.user._id,status:"ACTIVE"});
@@ -183,10 +186,16 @@ export async function updatePaymentSettings(req,res){
   if(!parsed.success)return res.status(400).json({message:validationError(parsed.error)});
   const business=await getOwnerBusiness(req);
   if(!business)return res.status(404).json({message:"Your approved business workspace was not found."});
+  const paymentMethod=parsed.data.paymentMethod||(parsed.data.paymentQrEnabled===false?"OFF":"QR");
+  if(paymentMethod==="GPAY"&&!parsed.data.upiId)return res.status(400).json({message:"Enter the GPay number or UPI ID customers should pay."});
   const image=req.file?await uploadStoreImage(req.file,business._id,"payment-qr"):null;
   const oldPublicId=business.paymentQrPublicId,oldQrUrl=business.paymentQrUrl;
-  const {removePaymentQr,...settings}=parsed.data;
-  Object.assign(business,settings);
+  const removePaymentQr=parsed.data.removePaymentQr;
+  const settings={...parsed.data};
+  delete settings.removePaymentQr;
+  delete settings.paymentMethod;
+  delete settings.paymentQrEnabled;
+  Object.assign(business,settings,{paymentMethod,paymentQrEnabled:paymentMethod==="QR"});
   if(image)Object.assign(business,{paymentQrUrl:image.imageUrl,paymentQrPublicId:image.publicId});
   else if(removePaymentQr)Object.assign(business,{paymentQrUrl:"",paymentQrPublicId:""});
   try{

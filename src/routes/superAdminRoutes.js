@@ -1,5 +1,5 @@
 import {Router} from "express";
-import {deleteBusiness,listApplications,listCustomerRecoveryRequests,rejectBusiness,reviewApplication,updateBusinessPlan,updateCustomerRecoveryRequest} from "../controllers/superAdminController.js";
+import {deleteBusiness,listApplications,listCustomerRecoveryRequests,rejectBusiness,reviewApplication,updateBusinessAdminPassword,updateBusinessPlan,updateCustomerRecoveryRequest} from "../controllers/superAdminController.js";
 import {broadcastToBusinesses,getSuperAdminInboxCounts,getSuperAdminSupport,listSupportBusinesses,listSuperAdminSupport,replySuperAdminSupport,updateSupportStatus} from "../controllers/supportController.js";
 import {asyncHandler} from "../middleware/asyncHandler.js";
 import {requireAuth,requireRole} from "../middleware/auth.js";
@@ -10,6 +10,7 @@ r.use(requireAuth,requireRole("SUPER_ADMIN"));
 r.get("/applications",asyncHandler(listApplications));
 r.post("/applications/:id/:decision",asyncHandler(reviewApplication));
 r.patch("/businesses/:id/plan",asyncHandler(updateBusinessPlan));
+r.patch("/businesses/:id/password",asyncHandler(updateBusinessAdminPassword));
 r.get("/testimonials",asyncHandler(listSuperAdminTestimonials));
 r.patch("/testimonials/:id",asyncHandler(updateTestimonialModeration));
 r.post("/businesses/:id/reject",asyncHandler(rejectBusiness));

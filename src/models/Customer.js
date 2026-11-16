@@ -5,6 +5,8 @@ const schema=new mongoose.Schema({
   customerName:{type:String,default:"",trim:true,maxlength:100},
   deliveryAddress:{type:String,default:"",trim:true,maxlength:500},
   pincode:{type:String,default:"",match:/^$|^\d{6}$/},
+  district:{type:String,default:"",trim:true,maxlength:100},
+  state:{type:String,default:"",trim:true,maxlength:100},
   email:{type:String,lowercase:true,trim:true},
   passwordHash:{type:String,required:true,select:false},
   lastLoginAt:Date

@@ -15,6 +15,8 @@ const registerSchema=z.object({
   email:z.string().trim().email().max(160).transform(value=>value.toLowerCase()),
   phone:phoneSchema,
   pincode:pincodeSchema,
+  district:z.string().trim().min(2).max(100),
+  state:z.string().trim().min(2).max(100),
   deliveryAddress:z.string().trim().min(8).max(500),
   password:z.string().min(10).max(100),
   confirmPassword:z.string().min(10).max(100)
@@ -26,6 +28,8 @@ const profileSchema=z.object({
   email:z.string().trim().email().max(160).transform(value=>value.toLowerCase()),
   phone:phoneSchema,
   pincode:pincodeSchema,
+  district:z.string().trim().min(2).max(100),
+  state:z.string().trim().min(2).max(100),
   deliveryAddress:z.string().trim().min(8).max(500),
   currentPassword:z.string().min(1).max(100),
   newPassword:z.string().max(100).optional().default(""),
@@ -44,7 +48,7 @@ function setCustomerSession(res,id){
   });
 }
 
-const customerView=customer=>({id:customer._id,customerName:customer.customerName||"",deliveryAddress:customer.deliveryAddress||"",phone:customer.phone,pincode:customer.pincode||"",email:customer.email||""});
+const customerView=customer=>({id:customer._id,customerName:customer.customerName||"",deliveryAddress:customer.deliveryAddress||"",phone:customer.phone,pincode:customer.pincode||"",district:customer.district||"",state:customer.state||"",email:customer.email||""});
 async function activeStore(req,res){
   const business=await Business.findOne({slug:req.params.slug,status:"ACTIVE"}).select("_id");
   if(!business)res.status(404).json({message:"This store is not available."});
@@ -58,7 +62,7 @@ export async function registerCustomer(req,res){
   if(!parsed.success)return res.status(400).json({message:parsed.error.issues[0]?.message||"Enter valid account details."});
   if(await Customer.exists({$or:[{phone:parsed.data.phone},{email:parsed.data.email}]}))return res.status(409).json({message:"An account with this email or mobile number already exists. Sign in instead."});
   const passwordHash=await bcrypt.hash(parsed.data.password,12);
-  const customer=await Customer.create({customerName:parsed.data.customerName,deliveryAddress:parsed.data.deliveryAddress,phone:parsed.data.phone,email:parsed.data.email,pincode:parsed.data.pincode,passwordHash});
+  const customer=await Customer.create({customerName:parsed.data.customerName,deliveryAddress:parsed.data.deliveryAddress,phone:parsed.data.phone,email:parsed.data.email,pincode:parsed.data.pincode,district:parsed.data.district,state:parsed.data.state,passwordHash});
   customer.lastLoginAt=new Date();
   await customer.save();
   setCustomerSession(res,customer._id);
@@ -104,6 +108,8 @@ export async function updateCustomerProfile(req,res){
   customer.email=parsed.data.email;
   customer.phone=parsed.data.phone;
   customer.pincode=parsed.data.pincode;
+  customer.district=parsed.data.district;
+  customer.state=parsed.data.state;
   if(parsed.data.newPassword)customer.passwordHash=await bcrypt.hash(parsed.data.newPassword,12);
   await customer.save();
   setCustomerSession(res,customer._id);

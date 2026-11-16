@@ -10,6 +10,7 @@ import {calculateProductPieces,calculateProductWeight,MIN_ORDER_WEIGHT_GRAMS} fr
 import {calculateRegionalDeliveryChargePaisa} from "../utils/deliveryPricing.js";
 import {getAnalyticsDateRange} from "../utils/analyticsPeriod.js";
 import {paymentReferenceSchema} from "../utils/paymentReference.js";
+import {getBusinessPaymentMethod} from "../utils/businessPaymentMethod.js";
 
 const checkoutSchema=z.object({
   items:z.array(z.object({
@@ -22,7 +23,8 @@ const messageReadSchema=z.object({throughMessageId:z.string().regex(/^[a-f\d]{24
 const paymentSchema=z.object({utr:paymentReferenceSchema});
 const billSchema=z.object({
   regionId:z.string().regex(/^[a-f\d]{24}$/i),
-  deliveryChargePaisa:z.coerce.number().int().min(0).max(100000000).optional()
+  deliveryChargePaisa:z.coerce.number().int().min(0).max(100000000).optional(),
+  billDescription:z.string().trim().max(500).optional().default("")
 });
 const tokenHash=token=>createHash("sha256").update(token).digest("hex");
 
@@ -93,7 +95,7 @@ async function reserveOrderStock(order){
 
 export async function createCustomerOrder(req,res){
   if(!req.customer)return res.status(401).json({message:"Sign in or create a customer account before placing an order."});
-  if(!req.customer.customerName||!req.customer.deliveryAddress||!req.customer.pincode)return res.status(400).json({message:"Complete your name, delivery address, and pincode in your customer profile before placing an order."});
+  if(!req.customer.customerName||!req.customer.deliveryAddress||!req.customer.pincode||!req.customer.district||!req.customer.state)return res.status(400).json({message:"Complete your name, delivery address, pincode, district, and state in your customer profile before placing an order."});
   const parsed=checkoutSchema.safeParse(req.body);
   if(!parsed.success)return res.status(400).json({message:validationMessage(parsed.error)});
   const business=await Business.findOne({slug:req.params.slug,status:"ACTIVE"});
@@ -164,6 +166,8 @@ export async function createCustomerOrder(req,res){
       customerPhone:req.customer.phone,
       deliveryAddress:req.customer.deliveryAddress,
       deliveryPincode:req.customer.pincode,
+      deliveryDistrict:req.customer.district,
+      deliveryState:req.customer.state,
       totalPieces:items.reduce((sum,item)=>sum+item.piecesPerPacket*item.packetQuantity,0),
       totalWeightGrams,
       totalWeightG:totalWeightGrams,
@@ -205,10 +209,10 @@ export async function listBusinessOrders(req,res){
   const parsed=z.object({archived:z.enum(["true","false"]).optional()}).safeParse(req.query);
   if(!parsed.success)return res.status(400).json({message:"Choose a valid order archive view."});
   const archived=parsed.data.archived==="true";
-  const orders=await Order.find({
-    businessId:req.tenantId,
-    businessArchivedAt:archived?{$ne:null}:null
-  }).sort({createdAt:-1}).limit(100).lean();
+  const filter=archived
+    ?{businessId:req.tenantId,$or:[{businessArchivedAt:{$ne:null}},{status:{$in:["REJECTED","CANCELLED","DELIVERED"]}}]}
+    :{businessId:req.tenantId,businessArchivedAt:null,status:{$in:["PLACED","ACCEPTED"]}};
+  const orders=await Order.find(filter).sort({createdAt:-1}).limit(100).lean();
   res.json({orders:orders.map(({customerId,businessArchivedBy,...order})=>order)});
 }
 
@@ -223,9 +227,9 @@ export async function archiveBusinessOrder(req,res){
       businessArchivedBy:archived?req.user._id:null
     }},
     {new:true,runValidators:true}
-  ).select("_id");
+  ).select("_id status");
   if(!order)return res.status(404).json({message:"Order not found in your store."});
-  res.json({message:archived?"Order archived. Its history and analytics are preserved.":"Order restored to active orders."});
+  res.json({message:archived?"Order archived. Its history and analytics are preserved.":["REJECTED","CANCELLED","DELIVERED"].includes(order.status)?"Order unarchived. It remains in order history.":"Order restored to current orders."});
 }
 
 export async function getBusinessOrderAnalytics(req,res){
@@ -265,15 +269,23 @@ export async function getBusinessOrderAnalytics(req,res){
 }
 
 export async function listCustomerOrders(req,res){
-  const parsed=z.object({page:z.coerce.number().int().min(1).max(100000)}).safeParse({page:req.query.page??1});
+  const parsed=z.object({page:z.coerce.number().int().min(1).max(100000),view:z.enum(["current","history"]).default("current")}).safeParse({page:req.query.page??1,view:req.query.view});
   if(!parsed.success)return res.status(400).json({message:"Invalid order history page."});
   const business=await Business.findOne({slug:req.params.slug,status:"ACTIVE"}).select("_id");
   if(!business)return res.status(404).json({message:"This store is not available."});
-  const page=parsed.data.page,limit=50;
-  const orders=await Order.find({customerId:req.customer._id,businessId:business._id,customerArchivedAt:null})
-    .select("orderNumber businessId totalWeightG subtotalInr deliveryFeeInr totalInr status paymentStatus unreadCustomerMessages createdAt updatedAt")
+  const page=parsed.data.page,limit=50,view=parsed.data.view;
+  const filter={
+    customerId:req.customer._id,
+    businessId:business._id,
+    customerArchivedAt:null,
+    ...(view==="current"
+      ?{businessArchivedAt:null,status:{$in:["PLACED","ACCEPTED"]}}
+      :{$or:[{businessArchivedAt:{$ne:null}},{status:{$in:["REJECTED","CANCELLED","DELIVERED"]}}]})
+  };
+  const orders=await Order.find(filter)
+    .select("orderNumber businessId customerName deliveryDistrict deliveryState totalWeightG subtotalInr deliveryFeeInr totalInr status paymentStatus unreadCustomerMessages billSnapshot.sentAt createdAt updatedAt")
     .populate("businessId","name slug")
-    .sort({createdAt:-1})
+    .sort(view==="current"?{"billSnapshot.sentAt":-1,createdAt:-1}:{createdAt:-1})
     .skip((page-1)*limit)
     .limit(limit+1)
     .lean();
@@ -292,7 +304,7 @@ export async function listCustomerOrders(req,res){
   }
   res.json({orders:orders.map(order=>{
     const latest=latestByOrder.get(String(order._id));
-    return {...order,unreadMessageCount:order.unreadCustomerMessages||0,latestMessagePreview:order.unreadCustomerMessages?latest?.body||"The store sent an update.":""};
+    return {...order,billSentAt:order.billSnapshot?.sentAt||null,unreadMessageCount:order.unreadCustomerMessages||0,latestMessagePreview:order.unreadCustomerMessages?latest?.body||"The store sent an update.":""};
   }),hasMore,page});
 }
 
@@ -320,9 +332,11 @@ export async function sendBusinessOrderBill(req,res){
   if(!order)return res.status(404).json({message:"Order not found in your store."});
   if(order.status!=="ACCEPTED")return res.status(409).json({message:"Accept the order before preparing its final bill."});
   if(order.billSnapshot)return res.status(409).json({message:"The final bill was already sent and cannot be changed."});
-  const business=await Business.findOne({_id:req.tenantId,status:"ACTIVE"}).select("name logoUrl contactPhone address city state pincode paymentQrUrl paymentQrPublicId paymentQrEnabled upiId paymentInstructions deliveryRegions");
+  const business=await Business.findOne({_id:req.tenantId,status:"ACTIVE"}).select("name logoUrl contactPhone address city state pincode paymentMethod paymentQrUrl paymentQrPublicId paymentQrEnabled upiId paymentInstructions deliveryRegions");
   if(!business)return res.status(404).json({message:"Your approved business workspace was not found."});
-  if(business.paymentQrEnabled&&!business.paymentQrUrl)return res.status(409).json({message:"Upload your customer payment QR or turn off QR payments before sending the final bill."});
+  const paymentMethod=getBusinessPaymentMethod(business);
+  if(paymentMethod==="QR"&&!business.paymentQrUrl)return res.status(409).json({message:"Upload your customer payment QR or choose another payment method before sending the final bill."});
+  if(paymentMethod==="GPAY"&&!business.upiId?.trim())return res.status(409).json({message:"Add the GPay number or UPI ID in Payment settings before sending this bill."});
   const region=business.deliveryRegions.find(item=>String(item._id)===parsed.data.regionId);
   if(!region)return res.status(400).json({message:"Choose a saved delivery region for this order."});
   let calculatedDeliveryChargePaisa;
@@ -332,12 +346,19 @@ export async function sendBusinessOrderBill(req,res){
   const productSubtotalPaisa=Math.round(Number(order.subtotalInr)*100);
   const totalPaisa=productSubtotalPaisa+deliveryChargePaisa;
   if(!Number.isSafeInteger(productSubtotalPaisa)||productSubtotalPaisa<0||!Number.isSafeInteger(totalPaisa))return res.status(409).json({message:"The order total exceeds the supported billing range."});
-  const includePaymentQr=business.paymentQrEnabled!==false&&Boolean(business.paymentQrUrl);
-  const paymentInstructions=includePaymentQr?(business.paymentInstructions?.trim()||"Please pay the total shown using this QR code. Include your order number in the payment note and submit the UTR after payment."):"";
+  const includePaymentQr=paymentMethod==="QR";
+  const includeUpiId=paymentMethod==="GPAY";
+  const paymentInstructions=paymentMethod==="QR"
+    ?business.paymentInstructions?.trim()||"Please pay the total shown using this QR code. Include your order number in the payment note and submit the UTR after payment."
+    :paymentMethod==="GPAY"
+      ?business.paymentInstructions?.trim()||"Please pay the total shown to this GPay number or UPI ID. Include your order number in the payment note and submit the UTR after payment."
+      :"";
   const sentAt=new Date();
   const billSnapshot={
     version:1,
     sentAt,
+    paymentMethodSnapshot:paymentMethod,
+    billDescriptionSnapshot:parsed.data.billDescription,
     business:{name:business.name,logoUrl:business.logoUrl,contactPhone:business.contactPhone,address:business.address,city:business.city,state:business.state,pincode:business.pincode},
     customer:{name:order.customerName,phone:order.customerPhone,address:order.deliveryAddress,district:order.deliveryDistrict,state:order.deliveryState,pincode:order.deliveryPincode},
     items:order.items.map(item=>({name:item.name,packetQuantity:item.packetQuantity,unitLabel:item.unitLabel,packetPrice:item.packetPrice,lineTotal:item.lineTotal})),
@@ -348,7 +369,7 @@ export async function sendBusinessOrderBill(req,res){
     deliveryChargePaisa,
     totalPaisa,
     paymentQrSnapshot:includePaymentQr?business.paymentQrUrl:"",
-    upiIdSnapshot:includePaymentQr?business.upiId||"":"",
+    upiIdSnapshot:includeUpiId?business.upiId||"":"",
     paymentInstructionsSnapshot:paymentInstructions
   };
   const updated=await Order.findOneAndUpdate(
@@ -363,7 +384,7 @@ export async function sendBusinessOrderBill(req,res){
       totalInr:totalPaisa/100,
       paymentQrSnapshot:includePaymentQr?business.paymentQrUrl:"",
       paymentQrSnapshotPublicId:includePaymentQr?business.paymentQrPublicId||"":"",
-      upiIdSnapshot:includePaymentQr?business.upiId||"":"",
+      upiIdSnapshot:includeUpiId?business.upiId||"":"",
       paymentInstructionsSnapshot:paymentInstructions
     }},
     {new:true,runValidators:true}
@@ -482,8 +503,8 @@ export async function markCustomerOrderMessagesRead(req,res){
 export async function submitCustomerPaymentProof(req,res){
   const order=await findCustomerOrder(req,res);
   if(!order||res.headersSent)return;
-  if(order.status!=="ACCEPTED"||!order.billSnapshot)return res.status(409).json({message:"Wait until the store accepts your order and sends the final bill with its payment QR."});
-  if(!order.billSnapshot.paymentQrSnapshot)return res.status(409).json({message:"QR payments are not enabled for this bill. Contact the store for payment details."});
+  if(order.status!=="ACCEPTED"||!order.billSnapshot)return res.status(409).json({message:"Wait until the store accepts your order and sends the final bill with payment details."});
+  if(!order.billSnapshot.paymentQrSnapshot&&!order.billSnapshot.upiIdSnapshot)return res.status(409).json({message:"This bill has no online payment details. Contact the store to arrange payment."});
   if(!req.file)return res.status(400).json({message:"Choose a payment proof image."});
   const parsed=paymentSchema.safeParse({utr:req.body.utr});
   if(!parsed.success)return res.status(400).json({message:"If available, enter a valid payment UTR (6–40 letters, numbers, or hyphens)."});

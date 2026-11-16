@@ -46,6 +46,7 @@ const schema=new mongoose.Schema({
   seoTitle:{type:String,default:"",trim:true,maxlength:70},
   seoDescription:{type:String,default:"",trim:true,maxlength:180},
   upiId:{type:String,default:"",trim:true,maxlength:120},
+  paymentMethod:{type:String,enum:["QR","GPAY","OFF"]},
   paymentInstructions:{type:String,default:"",maxlength:500},
   paymentQrUrl:{type:String,default:""},
   paymentQrPublicId:{type:String,default:""},

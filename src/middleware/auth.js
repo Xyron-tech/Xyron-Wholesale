@@ -1,5 +1,5 @@
 import jwt from "jsonwebtoken";import User from "../models/User.js";import Customer from "../models/Customer.js";import {env} from "../config/env.js";
-export async function requireAuth(req,res,next){try{const token=req.cookies?.xyron_session;if(!token)return res.status(401).json({message:"Please sign in to continue."});const payload=jwt.verify(token,env.JWT_SECRET);const user=await User.findById(payload.sub);if(!user||["SUSPENDED","REJECTED"].includes(user.accountStatus))return res.status(401).json({message:"Your account is not available."});req.user=user;next();}catch{return res.status(401).json({message:"Your session is invalid or has expired."});}}
+export async function requireAuth(req,res,next){try{const token=req.cookies?.xyron_session;if(!token)return res.status(401).json({message:"Please sign in to continue."});const payload=jwt.verify(token,env.JWT_SECRET);const user=await User.findById(payload.sub);if(!user||["SUSPENDED","REJECTED"].includes(user.accountStatus)||(payload.sessionVersion??0)!==(user.sessionVersion??0))return res.status(401).json({message:"Your account is not available."});req.user=user;next();}catch{return res.status(401).json({message:"Your session is invalid or has expired."});}}
 export async function optionalAuth(req,res,next){
  const token=req.cookies?.xyron_session;
  if(!token){req.user=null;return next();}
@@ -12,7 +12,7 @@ export async function optionalAuth(req,res,next){
  }
  try{
   const user=await User.findById(payload.sub);
-  if(!user||["SUSPENDED","REJECTED"].includes(user.accountStatus)){
+  if(!user||["SUSPENDED","REJECTED"].includes(user.accountStatus)||(payload.sessionVersion??0)!==(user.sessionVersion??0)){
    res.clearCookie("xyron_session",{httpOnly:true,secure:env.NODE_ENV==="production",sameSite:"lax",path:"/"});
    req.user=null;
    return next();

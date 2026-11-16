@@ -3,7 +3,8 @@ import {mock,test} from "node:test";
 import Business from "../models/Business.js";
 import Order from "../models/Order.js";
 import OrderMessage from "../models/OrderMessage.js";
-import {getBusinessOrderMessages,markBusinessOrderMessagesRead,markCustomerOrderMessagesRead,sendBusinessOrderBill,updateBusinessOrderStatus} from "./orderController.js";
+import Product from "../models/Product.js";
+import {createCustomerOrder,getBusinessOrderMessages,listBusinessOrders,listCustomerOrders,markBusinessOrderMessagesRead,markCustomerOrderMessagesRead,sendBusinessOrderBill,updateBusinessOrderStatus} from "./orderController.js";
 
 test("accepting an order sends a customer chat update and increments its unread count",async t=>{
   const order={_id:"order-id",businessId:"business-id",status:"PLACED",toObject(){return {...this};}};
@@ -97,7 +98,94 @@ test("a bill sent with QR payments disabled does not include QR payment details"
 
   assert.equal(res.statusCode,200);
   assert.equal(billUpdate.billSnapshot.paymentQrSnapshot,"");
+  assert.equal(billUpdate.billSnapshot.paymentMethodSnapshot,"OFF");
   assert.equal(billUpdate.billSnapshot.upiIdSnapshot,"");
   assert.equal(billUpdate.billSnapshot.paymentInstructionsSnapshot,"");
+  assert.equal(billUpdate.billSnapshot.billDescriptionSnapshot,"");
   assert.equal(billUpdate.paymentQrSnapshot,"");
+});
+
+test("a bill snapshots GPay details and the optional description",async t=>{
+  const regionId="bbbbbbbbbbbbbbbbbbbbbbbb";
+  const order={_id:"order-id",businessId:"business-id",status:"ACCEPTED",billSnapshot:null,totalWeightGrams:1000,subtotalInr:42,items:[{name:"Tea",packetQuantity:2,unitLabel:"bundle",packetPrice:21,lineTotal:42}]};
+  const business={name:"Store",paymentMethod:"GPAY",paymentQrEnabled:false,upiId:"9876543210",paymentInstructions:"Use the store number",deliveryRegions:[{_id:regionId,name:"Local",ratePerKgPaisa:10000}]};
+  let billUpdate;
+  t.mock.method(Order,"findOne",async()=>order);
+  t.mock.method(Business,"findOne",()=>({select:async()=>business}));
+  t.mock.method(Order,"findOneAndUpdate",async(_filter,update)=>{billUpdate=update.$set;return {...order,...billUpdate};});
+  const res={statusCode:200,status(code){this.statusCode=code;return this;},json(body){this.body=body;return this;}};
+
+  await sendBusinessOrderBill({params:{id:"order-id"},tenantId:"business-id",body:{regionId,deliveryChargePaisa:1000,billDescription:"  Call before delivery  "}},res);
+
+  assert.equal(res.statusCode,200);
+  assert.equal(billUpdate.billSnapshot.paymentMethodSnapshot,"GPAY");
+  assert.equal(billUpdate.billSnapshot.paymentQrSnapshot,"");
+  assert.equal(billUpdate.billSnapshot.upiIdSnapshot,"9876543210");
+  assert.equal(billUpdate.billSnapshot.paymentInstructionsSnapshot,"Use the store number");
+  assert.equal(billUpdate.billSnapshot.billDescriptionSnapshot,"Call before delivery");
+  assert.equal(billUpdate.upiIdSnapshot,"9876543210");
+});
+
+test("placing an order snapshots the customer's district and state",async t=>{
+  const productId="aaaaaaaaaaaaaaaaaaaaaaaa";
+  const product={_id:productId,name:"Tea",category:"Grocery",weightCalculationMethod:"BUNDLE",piecesPerBundle:10,bundleWeightGrams:1000,packetPrice:42,stockPackets:3,imageUrl:""};
+  const customer={_id:"customer-id",customerName:"Customer",phone:"9876543210",deliveryAddress:"12 Main Road, Chennai",pincode:"600001",district:"Chennai",state:"Tamil Nadu"};
+  let savedOrder;
+  t.mock.method(Business,"findOne",async()=>({_id:"business-id"}));
+  t.mock.method(Product,"find",()=>({lean:async()=>[product]}));
+  t.mock.method(Product,"findOneAndUpdate",async()=>product);
+  t.mock.method(Order,"create",async order=>{savedOrder=order;return {_id:"order-id",...order};});
+  const res={statusCode:200,status(code){this.statusCode=code;return this;},json(body){this.body=body;return this;}};
+
+  await createCustomerOrder({customer,params:{slug:"store"},body:{items:[{productId,packetQuantity:1}]}},res);
+
+  assert.equal(res.statusCode,201);
+  assert.equal(savedOrder.deliveryDistrict,"Chennai");
+  assert.equal(savedOrder.deliveryState,"Tamil Nadu");
+  assert.equal(res.body.order.deliveryDistrict,"Chennai");
+  assert.equal(res.body.order.deliveryState,"Tamil Nadu");
+});
+
+test("business current orders exclude rejected and archived orders",async t=>{
+  const query={sort(value){this.sortValue=value;return this;},limit(value){this.limitValue=value;return this;},lean:async()=>[]};
+  t.mock.method(Order,"find",filter=>{
+    assert.deepEqual(filter,{businessId:"business-id",businessArchivedAt:null,status:{$in:["PLACED","ACCEPTED"]}});
+    return query;
+  });
+  const res={statusCode:200,status(code){this.statusCode=code;return this;},json(body){this.body=body;return this;}};
+
+  await listBusinessOrders({tenantId:"business-id",query:{archived:"false"}},res);
+
+  assert.deepEqual(query.sortValue,{createdAt:-1});
+  assert.equal(res.body.orders.length,0);
+});
+
+test("business history includes rejected and archived orders",async t=>{
+  const query={sort(){return this;},limit(){return this;},lean:async()=>[]};
+  t.mock.method(Order,"find",filter=>{
+    assert.deepEqual(filter,{businessId:"business-id",$or:[{businessArchivedAt:{$ne:null}},{status:{$in:["REJECTED","CANCELLED","DELIVERED"]}}]});
+    return query;
+  });
+  const res={statusCode:200,status(code){this.statusCode=code;return this;},json(body){this.body=body;return this;}};
+
+  await listBusinessOrders({tenantId:"business-id",query:{archived:"true"}},res);
+
+  assert.deepEqual(res.body,{orders:[]});
+});
+
+test("customer order history separates current and past orders",async t=>{
+  const businessQuery={select:async()=>({_id:"business-id"})};
+  const query={select(){return this;},populate(){return this;},sort(value){this.sortValue=value;return this;},skip(){return this;},limit(){return this;},lean:async()=>[]};
+  let requestedFilter;
+  t.mock.method(Business,"findOne",()=>businessQuery);
+  t.mock.method(Order,"find",filter=>{requestedFilter=filter;return query;});
+  const res={statusCode:200,status(code){this.statusCode=code;return this;},json(body){this.body=body;return this;}};
+
+  await listCustomerOrders({params:{slug:"store"},customer:{_id:"customer-id"},query:{view:"current"}},res);
+  assert.deepEqual(requestedFilter,{customerId:"customer-id",businessId:"business-id",customerArchivedAt:null,businessArchivedAt:null,status:{$in:["PLACED","ACCEPTED"]}});
+  assert.deepEqual(query.sortValue,{"billSnapshot.sentAt":-1,createdAt:-1});
+
+  await listCustomerOrders({params:{slug:"store"},customer:{_id:"customer-id"},query:{view:"history"}},res);
+  assert.deepEqual(requestedFilter,{customerId:"customer-id",businessId:"business-id",customerArchivedAt:null,$or:[{businessArchivedAt:{$ne:null}},{status:{$in:["REJECTED","CANCELLED","DELIVERED"]}}]});
+  assert.deepEqual(query.sortValue,{createdAt:-1});
 });
