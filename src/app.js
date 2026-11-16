@@ -10,7 +10,7 @@ import testimonialRoutes from "./routes/testimonialRoutes.js";
 import {notFound,errorHandler} from "./middleware/errors.js";
 import {env} from "./config/env.js";
 
-const allowedOrigins=new Set([env.CLIENT_ORIGIN]);
+const allowedOrigins=new Set([env.CLIENT_ORIGIN,"https://xyronwebtech.com","https://www.xyronwebtech.com"]);
 if(env.NODE_ENV!=="production"){
   const configuredOrigin=new URL(env.CLIENT_ORIGIN);
   if(["localhost","127.0.0.1"].includes(configuredOrigin.hostname)){
