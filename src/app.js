@@ -31,7 +31,7 @@ app.use(cors({
 }));
 app.use(express.json({limit:"1mb"}));
 app.use(cookieParser());
-app.get("/api/health",(req,res)=>res.json({status:"ok",service:"xyron-wholesale-api"}));
+app.get(["/api","/api/health"],(req,res)=>res.json({status:"ok",service:"xyron-wholesale-api"}));
 app.use("/api/auth",rateLimit({windowMs:15*60*1000,limit:30,standardHeaders:"draft-7",legacyHeaders:false}),authRoutes);
 app.use("/api/super-admin",superAdminRoutes);
 app.use("/api/testimonials",testimonialRoutes);
