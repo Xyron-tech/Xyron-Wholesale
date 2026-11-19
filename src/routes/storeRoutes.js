@@ -8,6 +8,7 @@ import {optionalCustomerAuth,requireActiveBusiness,requireAuth,requireCustomerAu
 import {archiveBusinessOrder,archiveCustomerOrder,createBusinessOrderMessage,createCustomerOrder,createCustomerOrderMessage,getBusinessOrderAnalytics,getBusinessOrderMessages,getBusinessPaymentProof,getCustomerOrder,getCustomerOrderMessages,listBusinessOrders,listCustomerOrders,customerOrderAccess,markBusinessOrderMessagesRead,markCustomerOrderMessagesRead,reviewBusinessPayment,sendBusinessOrderBill,submitCustomerPaymentProof,updateBusinessOrderStatus} from "../controllers/orderController.js";
 import {createBusinessSupport,getBusinessInboxCounts,getBusinessSupport,getCustomerInboxCounts,listBusinessSupport,replyBusinessSupport} from "../controllers/supportController.js";
 import {getPincodeDetails,getPincodeRegions} from "../controllers/shippingController.js";
+import {createBusinessPlanUpgradeRequest} from "../controllers/planUpgradeController.js";
 
 const imageUpload=multer({storage:multer.memoryStorage(),limits:{fileSize:5*1024*1024,files:1}});
 const publicOrderWriteLimit=rateLimit({windowMs:15*60*1000,limit:30,standardHeaders:"draft-7",legacyHeaders:false});
@@ -45,6 +46,7 @@ router.post("/orders/:orderNumber/payment-proof",publicOrderWriteLimit,customerO
 
 router.use("/business",requireAuth,requireActiveBusiness);
 router.get("/business/storefront",asyncHandler(getStorefrontSettings));
+router.post("/business/plan-upgrade-requests",asyncHandler(createBusinessPlanUpgradeRequest));
 router.get("/business/inbox-counts",asyncHandler(getBusinessInboxCounts));
 router.get("/business/support",asyncHandler(listBusinessSupport));
 router.post("/business/support",businessSupportLimit,asyncHandler(createBusinessSupport));

@@ -4,6 +4,7 @@ import {broadcastToBusinesses,getSuperAdminInboxCounts,getSuperAdminSupport,list
 import {asyncHandler} from "../middleware/asyncHandler.js";
 import {requireAuth,requireRole} from "../middleware/auth.js";
 import {listSuperAdminTestimonials,updateTestimonialModeration} from "../controllers/testimonialController.js";
+import {listSuperAdminPlanUpgradeRequests,reviewPlanUpgradeRequest} from "../controllers/planUpgradeController.js";
 
 const r=Router();
 r.use(requireAuth,requireRole("SUPER_ADMIN"));
@@ -11,6 +12,8 @@ r.get("/applications",asyncHandler(listApplications));
 r.post("/applications/:id/:decision",asyncHandler(reviewApplication));
 r.patch("/businesses/:id/plan",asyncHandler(updateBusinessPlan));
 r.patch("/businesses/:id/password",asyncHandler(updateBusinessAdminPassword));
+r.get("/plan-upgrade-requests",asyncHandler(listSuperAdminPlanUpgradeRequests));
+r.patch("/plan-upgrade-requests/:id",asyncHandler(reviewPlanUpgradeRequest));
 r.get("/testimonials",asyncHandler(listSuperAdminTestimonials));
 r.patch("/testimonials/:id",asyncHandler(updateTestimonialModeration));
 r.post("/businesses/:id/reject",asyncHandler(rejectBusiness));
