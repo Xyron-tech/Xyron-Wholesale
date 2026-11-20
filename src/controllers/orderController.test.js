@@ -103,6 +103,7 @@ test("placing an order uses the postal PIN to calculate delivery and create the 
   await createCustomerOrder({customer,params:{slug:"store"},body:{items:[{productId,packetQuantity:1}]}},res);
 
   assert.equal(res.statusCode,201);
+  assert.equal(savedOrder.status,"ACCEPTED");
   assert.equal(savedOrder.deliveryDistrict,"Chennai");
   assert.equal(savedOrder.deliveryState,"Tamil Nadu");
   assert.equal(savedOrder.deliveryFeePending,false);

@@ -257,6 +257,7 @@ export async function createCustomerOrder(req,res){
       businessId:business._id,
       customerId:req.customer?._id||null,
       orderNumber:`XW-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString("hex").toUpperCase()}`,
+      status:"ACCEPTED",
       items,
       customerName:req.customer.customerName,
       customerPhone:req.customer.phone,

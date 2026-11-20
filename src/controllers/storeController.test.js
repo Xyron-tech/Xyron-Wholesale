@@ -79,12 +79,13 @@ test("public product filtering can return storefront favorites only",async t=>{
     };
   });
   t.mock.method(Product,"distinct",async()=>[]);
-  const response={json(payload){this.payload=payload;return this;}};
+  const response={headers:{},set(name,value){this.headers[name]=value;return this;},json(payload){this.payload=payload;return this;}};
 
   await getPublicProducts({params:{slug:"test-store"},query:{featuredOnly:"true"}},response);
 
-  assert.deepEqual(queriedFilter,{businessId,status:"ACTIVE",isFeatured:true});
+  assert.deepEqual(queriedFilter,{businessId,status:"ACTIVE",stockPackets:{$gt:0},isFeatured:true});
   assert.deepEqual(response.payload.products,[]);
+  assert.equal(response.headers["Cache-Control"],"public, max-age=0, s-maxage=5, stale-while-revalidate=10");
 });
 
 test("enabling a payment method alerts customers with unpaid open orders",async t=>{

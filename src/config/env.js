@@ -7,6 +7,7 @@ const schema=z.object({
   JWT_SECRET:z.string().min(32),
   JWT_EXPIRES_IN:z.string().default("8h"),
   MONGODB_URI:z.string().min(1),
+  MONGODB_MAX_POOL_SIZE:z.coerce.number().int().min(1).max(500).default(100),
   XYRON_PIN_DATABASE_PATH:z.string().trim().optional(),
   SUPER_ADMIN_NAME:z.string().default("Xyron Super Admin"),
   SUPER_ADMIN_EMAIL:z.string().email().optional(),

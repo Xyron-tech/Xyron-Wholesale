@@ -10,6 +10,8 @@ import {uniqueBusinessSlug} from "../utils/slug.js";
 import {getBusinessPaymentMethod} from "../utils/businessPaymentMethod.js";
 import {createPaymentInfoSnapshot,hasPaymentInfoChanged} from "../utils/paymentInfoSnapshot.js";
 
+const PUBLIC_STORE_CACHE_CONTROL="public, max-age=0, s-maxage=15, stale-while-revalidate=30";
+const PUBLIC_PRODUCTS_CACHE_CONTROL="public, max-age=0, s-maxage=5, stale-while-revalidate=10";
 const optionalNumber=maximum=>z.preprocess(value=>value===""||value==null?undefined:value,z.coerce.number().positive().max(maximum).optional());
 const optionalInteger=maximum=>z.preprocess(value=>value===""||value==null?undefined:value,z.coerce.number().int().positive().max(maximum).optional());
 const productBaseShape=z.object({
@@ -439,6 +441,7 @@ export async function getPublicStore(req,res){
   let pin=null;
   try{pin=findPincodeDetails(business.pincode);}
   catch(error){if(error.status!==503)throw error;}
+  res.set("Cache-Control",PUBLIC_STORE_CACHE_CONTROL);
   res.json({business:{name:business.name,slug:business.slug,category:business.category,description:business.description,announcementTitle:business.announcementTitle||"",announcementText:business.announcementText||"",announcements:storeAnnouncements(business),storeSections:(business.storeSections||[]).map(section=>({_id:section._id,title:section.title,subtitle:section.subtitle,productIds:section.productIds.map(id=>id.toString())})),logoUrl:business.logoUrl,contactPhone:business.contactPhone||"",whatsappNumber:business.whatsappNumber||"",address:business.address,city:business.city,state:business.state,pincode:business.pincode,location:pin?{lat:pin.lat,lng:pin.lng,centroidGrade:pin.centroidGrade}:null,instagramUrl:business.instagramUrl||"",youtubeUrl:business.youtubeUrl||"",facebookUrl:business.facebookUrl||"",linkedinUrl:business.linkedinUrl||"",twitterUrl:business.twitterUrl||"",telegramUrl:business.telegramUrl||"",seoTitle:advancedSeo?business.seoTitle||"":"",seoDescription:advancedSeo?business.seoDescription||"":"",sliderSlides:slides}});
 }
 
@@ -447,7 +450,7 @@ export async function getPublicProducts(req,res){
   if(!business)return res.status(404).json({message:"This store is not available."});
   const search=String(req.query.search||"").trim().slice(0,80);
   const category=String(req.query.category||"").trim().slice(0,80);
-  const filter={businessId:business._id,status:"ACTIVE"};
+  const filter={businessId:business._id,status:"ACTIVE",stockPackets:{$gt:0}};
   if(String(req.query.featuredOnly||"")==="true")filter.isFeatured=true;
   if(search){
     const safeSearch=search.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
@@ -455,7 +458,8 @@ export async function getPublicProducts(req,res){
   }
   if(category)filter.category=category;
   const products=await Product.find(filter).select("name description category weightCalculationMethod piecesPerBundle bundleWeightGrams piecesPerKg piecesPerPacket packetWeightGrams packetPrice stockPackets imageUrl isFeatured").sort({createdAt:-1}).limit(100).lean();
-  const categories=await Product.distinct("category",{businessId:business._id,status:"ACTIVE"});
+  const categories=await Product.distinct("category",{businessId:business._id,status:"ACTIVE",stockPackets:{$gt:0}});
+  res.set("Cache-Control",PUBLIC_PRODUCTS_CACHE_CONTROL);
   res.json({products,categories:categories.sort((a,b)=>a.localeCompare(b)),count:products.length});
 }
 
