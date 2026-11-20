@@ -6,16 +6,6 @@ import Order from "../models/Order.js";
 import SupportConversation from "../models/SupportConversation.js";
 
 const categorySchema=z.enum(["SUBSCRIPTION","PAYMENT","STORE","TECHNICAL","OTHER"]);
-const messageSchema=z.object({body:z.string().trim().min(2).max(2000),important:z.boolean().optional().default(false)});
-const newConversationSchema=z.object({
-  subject:z.string().trim().min(3).max(120),
-  category:categorySchema,
-  body:z.string().trim().min(2).max(2000).optional(),
-  requestedPlan:z.enum(["STARTER","GROWTH","PRO"]).optional()
-}).superRefine((value,ctx)=>{
-  if(value.requestedPlan&&value.category!=="SUBSCRIPTION")ctx.addIssue({code:"custom",message:"A requested plan must use the subscription topic.",path:["category"]});
-  if(!value.requestedPlan&&!value.body)ctx.addIssue({code:"custom",message:"Enter a message for Xyron Admin.",path:["body"]});
-});
 const broadcastSchema=z.object({
   scope:z.enum(["ALL","SELECTED"]),
   businessIds:z.array(z.string().refine(mongoose.isValidObjectId)).max(100).default([]),
@@ -34,121 +24,43 @@ function firstIssue(error){
 }
 
 export async function getBusinessInboxCounts(req,res){
-  const [pendingOrders,unreadConversations,unreadOrders]=await Promise.all([
+  const [pendingOrders,unreadAlerts]=await Promise.all([
     Order.countDocuments({businessId:req.tenantId,businessArchivedAt:null,status:"PLACED"}),
-    SupportConversation.countDocuments({businessId:req.tenantId,unreadForBusiness:true}),
-    Order.find({businessId:req.tenantId,businessArchivedAt:null,unreadBusinessMessages:{$gt:0}}).select("unreadBusinessMessages").lean()
+    SupportConversation.countDocuments({businessId:req.tenantId,broadcastId:{$ne:""},unreadForBusiness:true})
   ]);
-  const unreadOrderMessages=unreadOrders.reduce((total,order)=>total+(order.unreadBusinessMessages||0),0);
-  res.json({pendingOrders,unreadConversations,unreadOrderMessages});
+  res.json({pendingOrders,unreadAlerts});
+}
+
+export async function listBusinessNotifications(req,res){
+  const notifications=await SupportConversation.find({businessId:req.tenantId,broadcastId:{$ne:""}})
+    .sort({createdAt:-1})
+    .limit(100)
+    .lean();
+  res.json({notifications});
+}
+
+export async function markBusinessNotificationRead(req,res){
+  if(!mongoose.isValidObjectId(req.params.id))return res.status(400).json({message:"Invalid notification ID."});
+  const notification=await SupportConversation.findOneAndUpdate(
+    {_id:req.params.id,businessId:req.tenantId,broadcastId:{$ne:""}},
+    {$set:{unreadForBusiness:false}},
+    {new:true}
+  );
+  if(!notification)return res.status(404).json({message:"Notification not found in your business workspace."});
+  res.json({notification});
 }
 
 export async function getCustomerInboxCounts(req,res){
   const business=await Business.findOne({slug:req.params.slug,status:"ACTIVE"}).select("_id");
   if(!business)return res.status(404).json({message:"This store is not available."});
-  const unreadOrders=await Order.find({businessId:business._id,customerId:req.customer._id,customerArchivedAt:null,unreadCustomerMessages:{$gt:0}}).select("unreadCustomerMessages").lean();
-  const unreadOrderMessages=unreadOrders.reduce((total,order)=>total+(order.unreadCustomerMessages||0),0);
-  res.json({unreadOrderMessages});
-}
-
-export async function getSuperAdminInboxCounts(req,res){
-  const unreadConversations=await SupportConversation.countDocuments({unreadForSuperAdmin:true});
-  res.json({unreadConversations});
-}
-
-export async function listBusinessSupport(req,res){
-  const [conversations,latestBroadcast]=await Promise.all([
-    SupportConversation.find({businessId:req.tenantId}).sort({lastMessageAt:-1}).limit(100).lean(),
-    SupportConversation.findOne({businessId:req.tenantId,broadcastId:{$ne:""}}).sort({lastMessageAt:-1}).lean()
-  ]);
-  res.json({conversations,latestBroadcast});
-}
-
-export async function createBusinessSupport(req,res){
-  const parsed=newConversationSchema.safeParse(req.body);
-  if(!parsed.success)return res.status(400).json({message:firstIssue(parsed.error)});
-  if(parsed.data.requestedPlan){
-    const existing=await SupportConversation.findOne({businessId:req.tenantId,requestedPlan:parsed.data.requestedPlan,status:{$ne:"RESOLVED"}});
-    if(existing)return res.status(409).json({message:`Your ${parsed.data.requestedPlan} plan request is already waiting for Xyron Admin.`});
-  }
-  const conversation=await SupportConversation.create({
-    businessId:req.tenantId,
-    subject:parsed.data.subject,
-    category:parsed.data.category,
-    requestedPlan:parsed.data.requestedPlan||null,
-    messages:parsed.data.body?[{senderId:req.user._id,senderRole:"BUSINESS_OWNER",body:parsed.data.body}]:[],
-    lastMessageAt:new Date(),
-    unreadForSuperAdmin:true
-  });
-  res.status(201).json({conversation,message:parsed.data.requestedPlan?"Your plan request was sent to Xyron Admin.":"Your message was sent to Xyron Super Admin."});
-}
-
-export async function getBusinessSupport(req,res){
-  if(!mongoose.isValidObjectId(req.params.id))return res.status(400).json({message:"Invalid support conversation ID."});
-  const conversation=await SupportConversation.findOne({_id:req.params.id,businessId:req.tenantId});
-  if(!conversation)return res.status(404).json({message:"Support conversation not found."});
-  if(conversation.unreadForBusiness){conversation.unreadForBusiness=false;await conversation.save();}
-  res.json({conversation});
-}
-
-export async function replyBusinessSupport(req,res){
-  if(!mongoose.isValidObjectId(req.params.id))return res.status(400).json({message:"Invalid support conversation ID."});
-  const parsed=messageSchema.safeParse(req.body);
-  if(!parsed.success)return res.status(400).json({message:firstIssue(parsed.error)});
-  const conversation=await SupportConversation.findOne({_id:req.params.id,businessId:req.tenantId});
-  if(!conversation)return res.status(404).json({message:"Support conversation not found."});
-  conversation.messages.push({senderId:req.user._id,senderRole:"BUSINESS_OWNER",body:parsed.data.body});
-  conversation.status="OPEN";
-  conversation.lastMessageAt=new Date();
-  conversation.unreadForSuperAdmin=true;
-  conversation.unreadForBusiness=false;
-  await conversation.save();
-  res.status(201).json({conversation,message:"Your reply was sent."});
+  const unreadOrders=await Order.find({businessId:business._id,customerId:req.customer._id,customerArchivedAt:null,unreadCustomerOrderUpdates:{$gt:0}}).select("unreadCustomerOrderUpdates").lean();
+  const unreadOrderUpdates=unreadOrders.reduce((total,order)=>total+(order.unreadCustomerOrderUpdates||0),0);
+  res.json({unreadOrderUpdates});
 }
 
 export async function listSupportBusinesses(req,res){
   const businesses=await Business.find({status:"ACTIVE"}).select("_id name slug").sort({name:1}).lean();
   res.json({businesses});
-}
-
-export async function listSuperAdminSupport(req,res){
-  const status=["OPEN","IN_PROGRESS","RESOLVED"].includes(req.query.status)?req.query.status:null;
-  const filter={...(status?{status}:{}),...(req.query.unread==="true"?{unreadForSuperAdmin:true}:{})};
-  const conversations=await SupportConversation.find(filter).populate("businessId","name slug").sort({lastMessageAt:-1}).limit(200);
-  res.json({conversations});
-}
-
-export async function getSuperAdminSupport(req,res){
-  if(!mongoose.isValidObjectId(req.params.id))return res.status(400).json({message:"Invalid support conversation ID."});
-  const conversation=await SupportConversation.findById(req.params.id).populate("businessId","name slug");
-  if(!conversation)return res.status(404).json({message:"Support conversation not found."});
-  if(conversation.unreadForSuperAdmin){conversation.unreadForSuperAdmin=false;await conversation.save();}
-  res.json({conversation});
-}
-
-export async function replySuperAdminSupport(req,res){
-  if(!mongoose.isValidObjectId(req.params.id))return res.status(400).json({message:"Invalid support conversation ID."});
-  const parsed=messageSchema.safeParse(req.body);
-  if(!parsed.success)return res.status(400).json({message:firstIssue(parsed.error)});
-  const conversation=await SupportConversation.findById(req.params.id);
-  if(!conversation)return res.status(404).json({message:"Support conversation not found."});
-  conversation.messages.push({senderId:req.user._id,senderRole:"SUPER_ADMIN",body:parsed.data.body,important:parsed.data.important});
-  if(conversation.status==="OPEN")conversation.status="IN_PROGRESS";
-  conversation.lastMessageAt=new Date();
-  conversation.unreadForBusiness=true;
-  conversation.unreadForSuperAdmin=false;
-  await conversation.save();
-  await conversation.populate("businessId","name slug");
-  res.status(201).json({conversation,message:"Your reply was sent to the business."});
-}
-
-export async function updateSupportStatus(req,res){
-  if(!mongoose.isValidObjectId(req.params.id))return res.status(400).json({message:"Invalid support conversation ID."});
-  const parsed=z.object({status:z.enum(["OPEN","IN_PROGRESS","RESOLVED"])}).safeParse(req.body);
-  if(!parsed.success)return res.status(400).json({message:"Choose a valid support status."});
-  const conversation=await SupportConversation.findByIdAndUpdate(req.params.id,{$set:{status:parsed.data.status}},{new:true}).populate("businessId","name slug");
-  if(!conversation)return res.status(404).json({message:"Support conversation not found."});
-  res.json({conversation});
 }
 
 export async function broadcastToBusinesses(req,res){

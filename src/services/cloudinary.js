@@ -95,45 +95,6 @@ export async function deletePublicAsset(publicId,resourceType){
   return result.result==="ok"||result.result==="not found";
 }
 
-export async function uploadPrivatePaymentProof(file,orderNumber){
-  if(!isConfigured){
-    const error=new Error("Image uploads are not configured. Add Cloudinary credentials to the server environment.");
-    error.status=503;
-    throw error;
-  }
-  const detected=await fileTypeFromBuffer(file.buffer);
-  if(!detected||!["image/jpeg","image/png","image/webp"].includes(detected.mime)){
-    const error=new Error("Upload a valid JPG, PNG, or WebP payment proof.");
-    error.status=400;
-    throw error;
-  }
-  return new Promise((resolve,reject)=>{
-    const stream=cloudinary.uploader.upload_stream({
-      folder:`xyron-wholesale/payment-proofs/${orderNumber}`,
-      resource_type:"image",
-      type:"authenticated",
-      allowed_formats:["jpg","png","webp"],
-      transformation:[{width:1600,height:1600,crop:"limit",quality:"auto",fetch_format:"auto"}]
-    },(error,result)=>{
-      if(error)return reject(storageFailure(error));
-      if(!result?.public_id)return reject(storageFailure(new Error("Missing payment proof reference.")));
-      resolve({publicId:result.public_id});
-    });
-    stream.end(file.buffer);
-  });
-}
-
-export function getPrivatePaymentProofUrl(publicId){
-  if(!isConfigured)return "";
-  return cloudinary.url(publicId,{resource_type:"image",type:"authenticated",secure:true,sign_url:true});
-}
-
-export async function deletePrivatePaymentProof(publicId){
-  if(!isConfigured)return false;
-  const result=await cloudinary.uploader.destroy(publicId,{resource_type:"image",type:"authenticated"});
-  return result.result==="ok"||result.result==="not found";
-}
-
 export async function uploadPrivateChatVoice(file,businessId,orderNumber){
   if(!isConfigured){
     const error=new Error("Voice messages are not configured. Add Cloudinary credentials to the server environment.");

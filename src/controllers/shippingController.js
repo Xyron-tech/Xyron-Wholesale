@@ -1,10 +1,11 @@
-import {findPincodeDetails,listPincodeRegions} from "../services/pincodeDirectory.js";
+import {listPincodeRegions} from "../services/pincodeDirectory.js";
+import {findPostalPincodeDetails} from "../services/postalPincode.js";
 
 export async function getPincodeDetails(req,res){
   let details;
-  try{details=findPincodeDetails(req.params.pincode);}
+  try{details=await findPostalPincodeDetails(req.params.pincode);}
   catch(error){return res.status(error.status||400).json({message:error.message});}
-  if(!details)return res.status(404).json({message:"This PIN code is not present in the supplied PIN directory."});
+  if(!details)return res.status(404).json({message:"This PIN code was not found by India Post."});
   res.json({details});
 }
 

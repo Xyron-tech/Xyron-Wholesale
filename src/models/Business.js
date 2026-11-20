@@ -13,7 +13,11 @@ const sliderSchema=new mongoose.Schema({
 },{timestamps:true});
 const deliveryRegionSchema=new mongoose.Schema({
   name:{type:String,required:true,trim:true,maxlength:100},
-  ratePerKgPaisa:{type:Number,required:true,min:0,max:100000000}
+  ratePerKgPaisa:{type:Number,required:true,min:0,max:100000000},
+  matchType:{type:String,enum:["PINCODE","DISTRICT","STATE","MANUAL"],default:"MANUAL"},
+  pincode:{type:String,default:"",match:/^$|^[1-9]\d{5}$/},
+  district:{type:String,default:"",trim:true,maxlength:100},
+  state:{type:String,default:"",trim:true,maxlength:100}
 },{_id:true});
 const storeSectionSchema=new mongoose.Schema({
   title:{type:String,required:true,trim:true,maxlength:80},
@@ -56,7 +60,6 @@ const schema=new mongoose.Schema({
   subscriptionPlan:{type:String,enum:["STARTER","GROWTH","PRO"],default:"STARTER",index:true},
   subscriptionFeatures:{
     advancedSeo:{type:Boolean,default:false},
-    quickReplies:{type:Boolean,default:false},
     analytics:{type:Boolean,default:false}
   },
   subscriptionActivatedAt:Date,
@@ -65,6 +68,17 @@ const schema=new mongoose.Schema({
   city:{type:String,required:true,maxlength:80},
   state:{type:String,required:true,maxlength:80},
   pincode:{type:String,required:true,match:/^\d{6}$/},
+  deliveryRates:{
+    localPaisa:{type:Number,default:null,min:0,max:100000000},
+    sameDistrictPaisa:{type:Number,default:null,min:0,max:100000000},
+    sameStatePaisa:{type:Number,default:null,min:0,max:100000000},
+    otherStatePaisa:{type:Number,default:null,min:0,max:100000000}
+  },
+  minimumOrderWeightGrams:{type:Number,default:1000,min:1,max:100000000},
+  minimumOrderDisplayMode:{type:String,enum:["QUANTITY","WEIGHT"],default:"WEIGHT"},
+  minimumOrderQuantityMessage:{type:String,default:"Add at least {remainingUnits} more {unitLabel} to place your order (minimum {minimumWeight}).",trim:true,maxlength:180},
+  minimumOrderWeightMessage:{type:String,default:"Add {remainingWeight} more to place your order (minimum {minimumWeight}).",trim:true,maxlength:180},
+  minimumOrderSliderText:{type:String,default:"Minimum order: {minimumWeight}",trim:true,maxlength:180},
   deliveryRegions:{type:[deliveryRegionSchema],default:[]},
   sliderSlides:{type:[sliderSchema],default:[]},
   storeSections:{type:[storeSectionSchema],default:[]},

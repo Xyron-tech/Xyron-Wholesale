@@ -2,15 +2,14 @@ import {createHash,randomBytes,timingSafeEqual} from "node:crypto";
 import {z} from "zod";
 import Business from "../models/Business.js";
 import Order from "../models/Order.js";
-import OrderMessage from "../models/OrderMessage.js";
 import Product from "../models/Product.js";
-import {deletePrivatePaymentProof,getPrivatePaymentProofUrl,uploadPrivatePaymentProof} from "../services/cloudinary.js";
 import {hasBusinessFeature} from "../utils/businessPlans.js";
 import {calculateProductPieces,calculateProductWeight,MIN_ORDER_WEIGHT_GRAMS} from "../utils/productWeight.js";
-import {calculateRegionalDeliveryChargePaisa} from "../utils/deliveryPricing.js";
+import {calculateRegionalDeliveryChargePaisa,resolveDeliveryRate} from "../utils/deliveryPricing.js";
 import {getAnalyticsDateRange} from "../utils/analyticsPeriod.js";
-import {paymentReferenceSchema} from "../utils/paymentReference.js";
 import {getBusinessPaymentMethod} from "../utils/businessPaymentMethod.js";
+import {createPaymentInfoSnapshot} from "../utils/paymentInfoSnapshot.js";
+import {findPostalPincodeDetails,PincodeLookupError} from "../services/postalPincode.js";
 
 const checkoutSchema=z.object({
   items:z.array(z.object({
@@ -18,9 +17,6 @@ const checkoutSchema=z.object({
     packetQuantity:z.coerce.number().int().min(1).max(100000)
   })).min(1).max(50)
 });
-const chatSchema=z.object({body:z.string().trim().min(1).max(2000)});
-const messageReadSchema=z.object({throughMessageId:z.string().regex(/^[a-f\d]{24}$/i)});
-const paymentSchema=z.object({utr:paymentReferenceSchema});
 const billSchema=z.object({
   regionId:z.string().regex(/^[a-f\d]{24}$/i),
   deliveryChargePaisa:z.coerce.number().int().min(0).max(100000000).optional(),
@@ -31,9 +27,77 @@ const tokenHash=token=>createHash("sha256").update(token).digest("hex");
 function validationMessage(error){
   return error.issues?.[0]?.message||"Please check the submitted details.";
 }
+function displayWeightGrams(value){
+  return value>=1000?`${Number((value/1000).toFixed(2))} kg`:`${Math.ceil(value)} g`;
+}
+function minimumOrderMessage(business,totalWeightGrams,items){
+  const minimumWeightGrams=Number.isSafeInteger(business.minimumOrderWeightGrams)&&business.minimumOrderWeightGrams>0
+    ?business.minimumOrderWeightGrams
+    :MIN_ORDER_WEIGHT_GRAMS;
+  const remainingWeightGrams=Math.max(0,minimumWeightGrams-totalWeightGrams);
+  const minimumUnitWeightGrams=Math.max(0,...items.map(item=>Number(item.packetWeightGrams)||0));
+  const remainingUnits=minimumUnitWeightGrams?Math.ceil(remainingWeightGrams/minimumUnitWeightGrams):1;
+  const values={
+    remainingUnits:String(remainingUnits),
+    unitLabel:remainingUnits===1?"unit":"units",
+    remainingWeight:displayWeightGrams(remainingWeightGrams),
+    minimumWeight:displayWeightGrams(minimumWeightGrams)
+  };
+  const mode=business.minimumOrderDisplayMode==="QUANTITY"?"QUANTITY":"WEIGHT";
+  const template=mode==="QUANTITY"
+    ?business.minimumOrderQuantityMessage||"Add at least {remainingUnits} more {unitLabel} to place your order (minimum {minimumWeight})."
+    :business.minimumOrderWeightMessage||"Add {remainingWeight} more to place your order (minimum {minimumWeight}).";
+  const message=template.replace(/\{(remainingUnits|unitLabel|remainingWeight|minimumWeight)\}/g,(_match,key)=>values[key]);
+  return {message,minimumOrderWeightGrams:minimumWeightGrams,remainingWeightGrams,minimumAdditionalUnits:remainingUnits,minimumOrderDisplayMode:mode};
+}
 function orderView(order){
-  const {customerAccessTokenHash,paymentProofPublicId,customerId,unreadBusinessMessages,unreadCustomerMessages,...visible}=order.toObject?order.toObject():order;
+  const {customerAccessTokenHash,paymentProofPublicId,customerId,unreadCustomerOrderUpdates,...visible}=order.toObject?order.toObject():order;
   return visible;
+}
+async function lookupOrderPincode(pincode,source){
+  try{return await findPostalPincodeDetails(pincode);}
+  catch(error){
+    if(!(error instanceof PincodeLookupError))throw error;
+    console.error(`India Post PIN lookup failed for the ${source} address. Delivery charge will remain pending.`,error);
+    return null;
+  }
+}
+function billBusinessSnapshot(business){
+  return {
+    name:business.name,
+    logoUrl:business.logoUrl,
+    contactPhone:business.contactPhone,
+    address:business.address,
+    city:business.city,
+    state:business.state,
+    pincode:business.pincode
+  };
+}
+function createOrderBillSnapshot({business,customer,items,totalWeightGrams,productSubtotalPaisa,deliveryChargePaisa,region,paymentInfoSnapshot,sentAt}){
+  const payment=paymentInfoSnapshot||{
+    paymentMethodSnapshot:"OFF",
+    paymentQrSnapshot:"",
+    upiIdSnapshot:"",
+    paymentInstructionsSnapshot:""
+  };
+  return {
+    version:1,
+    sentAt,
+    paymentMethodSnapshot:payment.paymentMethodSnapshot,
+    billDescriptionSnapshot:"",
+    business:billBusinessSnapshot(business),
+    customer:{name:customer.customerName,phone:customer.phone,address:customer.deliveryAddress,district:customer.district,state:customer.state,pincode:customer.pincode},
+    items:items.map(item=>({name:item.name,packetQuantity:item.packetQuantity,unitLabel:item.unitLabel,packetPrice:item.packetPrice,lineTotal:item.lineTotal})),
+    totalWeightGrams,
+    region:{...(region.id?{id:region.id}:{}),name:region.name,ratePerKgPaisa:region.ratePerKgPaisa,matchType:region.matchType},
+    productSubtotalPaisa,
+    calculatedDeliveryChargePaisa:deliveryChargePaisa,
+    deliveryChargePaisa,
+    totalPaisa:productSubtotalPaisa+deliveryChargePaisa,
+    paymentQrSnapshot:payment.paymentQrSnapshot||"",
+    upiIdSnapshot:payment.upiIdSnapshot||"",
+    paymentInstructionsSnapshot:payment.paymentInstructionsSnapshot||""
+  };
 }
 function addTokenHeader(req,res,next){
   req.customerOrderToken=String(req.get("x-order-access-token")||"");
@@ -47,7 +111,7 @@ async function findCustomerOrder(req,res){
     if(!business)return res.status(404).json({message:"This store is not available."});
     filter.businessId=business._id;
   }
-  const order=await Order.findOne(filter).select("+customerAccessTokenHash +paymentProofPublicId");
+  const order=await Order.findOne(filter).select("+customerAccessTokenHash");
   if(!order)return res.status(404).json({message:"Order not found."});
   if(req.customer&&req.params.slug&&order.customerId?.toString()===req.customer._id.toString())return order;
   if(token.length<32)return res.status(401).json({message:"Sign in to the customer account used for this order, or use its secure order link."});
@@ -103,7 +167,11 @@ export async function createCustomerOrder(req,res){
 
   const requested=new Map();
   for(const item of parsed.data.items)requested.set(item.productId,(requested.get(item.productId)||0)+item.packetQuantity);
-  const products=await Product.find({_id:{$in:Array.from(requested.keys())},businessId:business._id,status:"ACTIVE"}).lean();
+  const [products,customerLocation,businessLocation]=await Promise.all([
+    Product.find({_id:{$in:Array.from(requested.keys())},businessId:business._id,status:"ACTIVE"}).lean(),
+    lookupOrderPincode(req.customer.pincode,"customer"),
+    lookupOrderPincode(business.pincode,"business")
+  ]);
   if(products.length!==requested.size)return res.status(409).json({message:"A product in your cart is no longer available from this store."});
 
   const items=[];
@@ -138,8 +206,36 @@ export async function createCustomerOrder(req,res){
     });
   }
   const totalWeightGrams=Number(items.reduce((sum,item)=>sum+item.quantityWeightG,0).toFixed(6));
-  if(totalWeightGrams<MIN_ORDER_WEIGHT_GRAMS)return res.status(400).json({message:`Minimum order weight is 1 KG. Add ${MIN_ORDER_WEIGHT_GRAMS-totalWeightGrams} g more to continue.`,minimumOrderWeightGrams:MIN_ORDER_WEIGHT_GRAMS,totalWeightGrams});
+  const minimumOrder=minimumOrderMessage(business,totalWeightGrams,items);
+  if(totalWeightGrams<minimumOrder.minimumOrderWeightGrams)return res.status(400).json({...minimumOrder,totalWeightGrams});
   const subtotalInr=items.reduce((sum,item)=>sum+Math.round(item.lineTotal*100),0)/100;
+  const deliveryRegion=resolveDeliveryRate({
+    business,
+    customerPincode:req.customer.pincode,
+    customerLocation,
+    businessLocation
+  });
+  let deliveryChargePaisa=0;
+  if(deliveryRegion){
+    try{deliveryChargePaisa=calculateRegionalDeliveryChargePaisa(totalWeightGrams,deliveryRegion.ratePerKgPaisa);}
+    catch(error){return res.status(409).json({message:error.message});}
+  }
+  const productSubtotalPaisa=Math.round(subtotalInr*100);
+  const totalPaisa=productSubtotalPaisa+deliveryChargePaisa;
+  if(!Number.isSafeInteger(productSubtotalPaisa)||!Number.isSafeInteger(totalPaisa))return res.status(409).json({message:"The order total exceeds the supported billing range."});
+  const paymentInfoSnapshot=createPaymentInfoSnapshot(business);
+  const sentAt=new Date();
+  const billSnapshot=deliveryRegion?createOrderBillSnapshot({
+    business,
+    customer:{...req.customer,district:customerLocation?.district||req.customer.district,state:customerLocation?.state||req.customer.state},
+    items,
+    totalWeightGrams,
+    productSubtotalPaisa,
+    deliveryChargePaisa,
+    region:deliveryRegion,
+    paymentInfoSnapshot,
+    sentAt
+  }):null;
 
   const reserved=[];
   try{
@@ -166,17 +262,26 @@ export async function createCustomerOrder(req,res){
       customerPhone:req.customer.phone,
       deliveryAddress:req.customer.deliveryAddress,
       deliveryPincode:req.customer.pincode,
-      deliveryDistrict:req.customer.district,
-      deliveryState:req.customer.state,
+      deliveryDistrict:customerLocation?.district||req.customer.district,
+      deliveryState:customerLocation?.state||req.customer.state,
+      deliveryZoneName:deliveryRegion?.name||"",
+      deliveryRegionSnapshot:billSnapshot?.region||null,
+      deliveryFeePending:!deliveryRegion,
+      billSnapshot,
       totalPieces:items.reduce((sum,item)=>sum+item.piecesPerPacket*item.packetQuantity,0),
       totalWeightGrams,
       totalWeightG:totalWeightGrams,
       productTotalInr:subtotalInr,
       subtotalInr,
-      deliveryChargeInr:0,
-      deliveryFeeInr:0,
-      grandTotalInr:subtotalInr,
-      totalInr:subtotalInr,
+      deliveryChargeInr:deliveryChargePaisa/100,
+      deliveryFeeInr:deliveryChargePaisa/100,
+      grandTotalInr:totalPaisa/100,
+      totalInr:totalPaisa/100,
+      paymentInfoSnapshot,
+      paymentQrSnapshot:paymentInfoSnapshot?.paymentQrSnapshot||"",
+      paymentQrSnapshotPublicId:paymentInfoSnapshot?.paymentQrSnapshot?business.paymentQrPublicId||"":"",
+      upiIdSnapshot:paymentInfoSnapshot?.upiIdSnapshot||"",
+      paymentInstructionsSnapshot:paymentInfoSnapshot?.paymentInstructionsSnapshot||"",
       customerAccessTokenHash:tokenHash(accessToken)
     });
     return res.status(201).json({order:orderView(order),accessToken});
@@ -202,6 +307,13 @@ export async function createCustomerOrder(req,res){
 export async function getCustomerOrder(req,res){
   const order=await findCustomerOrder(req,res);
   if(!order||res.headersSent)return;
+  res.json({order:orderView(order)});
+}
+
+export async function getBusinessOrder(req,res){
+  if(!/^[a-f\d]{24}$/i.test(req.params.id||""))return res.status(400).json({message:"Invalid order ID."});
+  const order=await Order.findOne({_id:req.params.id,businessId:req.tenantId});
+  if(!order)return res.status(404).json({message:"Order not found in your store."});
   res.json({order:orderView(order)});
 }
 
@@ -283,7 +395,7 @@ export async function listCustomerOrders(req,res){
       :{$or:[{businessArchivedAt:{$ne:null}},{status:{$in:["REJECTED","CANCELLED","DELIVERED"]}}]})
   };
   const orders=await Order.find(filter)
-    .select("orderNumber businessId customerName deliveryDistrict deliveryState totalWeightG subtotalInr deliveryFeeInr totalInr status paymentStatus unreadCustomerMessages billSnapshot.sentAt createdAt updatedAt")
+    .select("orderNumber businessId customerName deliveryDistrict deliveryState totalWeightG subtotalInr deliveryFeeInr deliveryFeePending totalInr status paymentStatus unreadCustomerOrderUpdates billSnapshot.sentAt createdAt updatedAt")
     .populate("businessId","name slug")
     .sort(view==="current"?{"billSnapshot.sentAt":-1,createdAt:-1}:{createdAt:-1})
     .skip((page-1)*limit)
@@ -291,21 +403,11 @@ export async function listCustomerOrders(req,res){
     .lean();
   const hasMore=orders.length>limit;
   if(hasMore)orders.pop();
-  const orderIds=orders.map(order=>order._id);
-  const latestMessages=orderIds.length?await OrderMessage.find({businessId:business._id,orderId:{$in:orderIds},senderRole:"BUSINESS_OWNER",kind:"TEXT"})
-    .select("orderId body createdAt")
-    .sort({createdAt:-1})
-    .limit(500)
-    .lean():[];
-  const latestByOrder=new Map();
-  for(const message of latestMessages){
-    const id=String(message.orderId);
-    if(!latestByOrder.has(id))latestByOrder.set(id,message);
-  }
-  res.json({orders:orders.map(order=>{
-    const latest=latestByOrder.get(String(order._id));
-    return {...order,billSentAt:order.billSnapshot?.sentAt||null,unreadMessageCount:order.unreadCustomerMessages||0,latestMessagePreview:order.unreadCustomerMessages?latest?.body||"The store sent an update.":""};
-  }),hasMore,page});
+  res.json({orders:orders.map(order=>({
+    ...order,
+    billSentAt:order.billSnapshot?.sentAt||null,
+    unreadUpdateCount:order.unreadCustomerOrderUpdates||0
+  })),hasMore,page});
 }
 
 export async function archiveCustomerOrder(req,res){
@@ -337,6 +439,7 @@ export async function sendBusinessOrderBill(req,res){
   const paymentMethod=getBusinessPaymentMethod(business);
   if(paymentMethod==="QR"&&!business.paymentQrUrl)return res.status(409).json({message:"Upload your customer payment QR or choose another payment method before sending the final bill."});
   if(paymentMethod==="GPAY"&&!business.upiId?.trim())return res.status(409).json({message:"Add the GPay number or UPI ID in Payment settings before sending this bill."});
+  const paymentInfoSnapshot=createPaymentInfoSnapshot(business);
   const region=business.deliveryRegions.find(item=>String(item._id)===parsed.data.regionId);
   if(!region)return res.status(400).json({message:"Choose a saved delivery region for this order."});
   let calculatedDeliveryChargePaisa;
@@ -349,9 +452,9 @@ export async function sendBusinessOrderBill(req,res){
   const includePaymentQr=paymentMethod==="QR";
   const includeUpiId=paymentMethod==="GPAY";
   const paymentInstructions=paymentMethod==="QR"
-    ?business.paymentInstructions?.trim()||"Please pay the total shown using this QR code. Include your order number in the payment note and submit the UTR after payment."
+    ?business.paymentInstructions?.trim()||"Please pay the total shown using this QR code and include your order number in the payment note."
     :paymentMethod==="GPAY"
-      ?business.paymentInstructions?.trim()||"Please pay the total shown to this GPay number or UPI ID. Include your order number in the payment note and submit the UTR after payment."
+      ?business.paymentInstructions?.trim()||"Please pay the total shown to this GPay number or UPI ID and include your order number in the payment note."
       :"";
   const sentAt=new Date();
   const billSnapshot={
@@ -374,19 +477,24 @@ export async function sendBusinessOrderBill(req,res){
   };
   const updated=await Order.findOneAndUpdate(
     {_id:order._id,businessId:req.tenantId,status:"ACCEPTED",billSnapshot:null},
-    {$set:{
-      billSnapshot,
-      deliveryRegionSnapshot:billSnapshot.region,
-      deliveryZoneName:region.name,
-      deliveryChargeInr:deliveryChargePaisa/100,
-      deliveryFeeInr:deliveryChargePaisa/100,
-      grandTotalInr:totalPaisa/100,
-      totalInr:totalPaisa/100,
-      paymentQrSnapshot:includePaymentQr?business.paymentQrUrl:"",
-      paymentQrSnapshotPublicId:includePaymentQr?business.paymentQrPublicId||"":"",
-      upiIdSnapshot:includeUpiId?business.upiId||"":"",
-      paymentInstructionsSnapshot:paymentInstructions
-    }},
+    {
+      $set:{
+        billSnapshot,
+        deliveryRegionSnapshot:billSnapshot.region,
+        deliveryZoneName:region.name,
+        deliveryChargeInr:deliveryChargePaisa/100,
+        deliveryFeeInr:deliveryChargePaisa/100,
+        deliveryFeePending:false,
+        grandTotalInr:totalPaisa/100,
+        totalInr:totalPaisa/100,
+        paymentInfoSnapshot,
+        paymentQrSnapshot:includePaymentQr?business.paymentQrUrl:"",
+        paymentQrSnapshotPublicId:includePaymentQr?business.paymentQrPublicId||"":"",
+        upiIdSnapshot:includeUpiId?business.upiId||"":"",
+        paymentInstructionsSnapshot:paymentInstructions
+      },
+      $inc:{unreadCustomerOrderUpdates:1}
+    },
     {new:true,runValidators:true}
   );
   if(!updated)return res.status(409).json({message:"This order changed while you were preparing its bill. Refresh and try again."});
@@ -400,13 +508,7 @@ export async function updateBusinessOrderStatus(req,res){
   if(!order)return res.status(404).json({message:"Order not found in your store."});
   const previousStatus=order.status,targetStatus=parsed.data.status;
   const wasRejected=["REJECTED","CANCELLED"].includes(previousStatus);
-  if(previousStatus===targetStatus){
-    if(targetStatus==="ACCEPTED"){
-      try{await sendOrderAcceptedMessage(order,req.user.name);}
-      catch(error){console.error("The accepted order's customer update could not be sent.",error);return res.status(500).json({message:"The order is accepted, but its customer update could not be sent. Retry the acceptance or send a message in order chat."});}
-    }
-    return res.json({order:orderView(order)});
-  }
+  if(previousStatus===targetStatus)return res.json({order:orderView(order)});
   if(targetStatus==="REJECTED"&&["DISPATCHED","DELIVERED"].includes(previousStatus)){
     return res.status(409).json({message:"An order that has already been dispatched or delivered cannot be rejected."});
   }
@@ -417,9 +519,11 @@ export async function updateBusinessOrderStatus(req,res){
   }
   let updated;
   try{
+    const update={$set:{status:targetStatus}};
+    if(targetStatus==="ACCEPTED")update.$inc={unreadCustomerOrderUpdates:1};
     updated=await Order.findOneAndUpdate(
       {_id:order._id,businessId:req.tenantId,status:previousStatus},
-      {$set:{status:targetStatus}},
+      update,
       {new:true,runValidators:true}
     );
   }catch(error){
@@ -434,138 +538,16 @@ export async function updateBusinessOrderStatus(req,res){
     try{await restoreOrderStock(order);}
     catch(error){console.error("The order was rejected, but its reserved stock could not be restored.",error);return res.status(500).json({message:"The order was rejected, but stock restoration needs review."});}
   }
-  if(targetStatus==="ACCEPTED"){
-    try{await sendOrderAcceptedMessage(updated,req.user.name);}
-    catch(error){console.error("The order was accepted, but its customer update could not be sent.",error);return res.status(500).json({message:"The order was accepted, but its customer update could not be sent. Retry the acceptance or send a message in order chat."});}
-  }
   res.json({order:orderView(updated)});
 }
 
-async function sendOrderAcceptedMessage(order,senderName){
-  const eventKey="ORDER_ACCEPTED";
-  if(await OrderMessage.exists({orderId:order._id,eventKey}))return;
-  try{
-    await OrderMessage.create({
-      businessId:order.businessId,
-      orderId:order._id,
-      senderRole:"BUSINESS_OWNER",
-      senderName,
-      body:"Your order has been accepted. The store will prepare and send your final bill shortly.",
-      eventKey
-    });
-    await Order.updateOne({_id:order._id,businessId:order.businessId},{$inc:{unreadCustomerMessages:1}});
-  }catch(error){
-    if(error?.code===11000)return;
-    throw error;
-  }
-}
-
-async function listMessages(order,res){
-  const messages=await OrderMessage.find({businessId:order.businessId,orderId:order._id,kind:"TEXT"}).sort({createdAt:-1}).limit(200).lean();
-  messages.reverse();
-  res.json({messages});
-}
-async function markMessagesRead(order,req,res,readerRole){
-  const parsed=messageReadSchema.safeParse(req.body);
-  if(!parsed.success)return res.status(400).json({message:"Refresh the conversation before marking messages as read."});
-  const {throughMessageId}=parsed.data;
-  const latestMessage=await OrderMessage.findOne({businessId:order.businessId,orderId:order._id,kind:"TEXT"})
-    .sort({createdAt:-1,_id:-1}).select("_id").lean();
-  if(String(latestMessage?._id||"")!==throughMessageId)return res.json({markedRead:false});
-  const unreadField=readerRole==="BUSINESS_OWNER"?"unreadBusinessMessages":"unreadCustomerMessages";
-  const unreadCount=Number(order[unreadField]||0);
-  if(unreadCount===0)return res.json({markedRead:true});
+export async function markCustomerOrderNotificationsRead(req,res){
+  const order=await findCustomerOrder(req,res);
+  if(!order||res.headersSent)return;
   const result=await Order.updateOne(
-    {_id:order._id,businessId:order.businessId,[unreadField]:unreadCount},
-    {$set:{[unreadField]:0}}
+    {_id:order._id,businessId:order.businessId,unreadCustomerOrderUpdates:{$gt:0}},
+    {$set:{unreadCustomerOrderUpdates:0}}
   );
   res.json({markedRead:result.modifiedCount===1});
-}
-async function createMessage(order,{senderRole,senderName,body},res){
-  const parsed=chatSchema.safeParse({body});
-  if(!parsed.success)return res.status(400).json({message:validationMessage(parsed.error)});
-  if(order.status==="CANCELLED")return res.status(409).json({message:"Chat is closed for cancelled orders."});
-  const message=await OrderMessage.create({businessId:order.businessId,orderId:order._id,senderRole,senderName,body:parsed.data.body});
-  const unreadField=senderRole==="CUSTOMER"?"unreadBusinessMessages":"unreadCustomerMessages";
-  await Order.updateOne({_id:order._id,businessId:order.businessId},{$inc:{[unreadField]:1}});
-  res.status(201).json({message:message.toObject()});
-}
-export async function getCustomerOrderMessages(req,res){
-  const order=await findCustomerOrder(req,res);
-  if(!order||res.headersSent)return;
-  await listMessages(order,res);
-}
-export async function markCustomerOrderMessagesRead(req,res){
-  const order=await findCustomerOrder(req,res);
-  if(!order||res.headersSent)return;
-  await markMessagesRead(order,req,res,"CUSTOMER");
-}
-export async function submitCustomerPaymentProof(req,res){
-  const order=await findCustomerOrder(req,res);
-  if(!order||res.headersSent)return;
-  if(order.status!=="ACCEPTED"||!order.billSnapshot)return res.status(409).json({message:"Wait until the store accepts your order and sends the final bill with payment details."});
-  if(!order.billSnapshot.paymentQrSnapshot&&!order.billSnapshot.upiIdSnapshot)return res.status(409).json({message:"This bill has no online payment details. Contact the store to arrange payment."});
-  if(!req.file)return res.status(400).json({message:"Choose a payment proof image."});
-  const parsed=paymentSchema.safeParse({utr:req.body.utr});
-  if(!parsed.success)return res.status(400).json({message:"If available, enter a valid payment UTR (6–40 letters, numbers, or hyphens)."});
-  if(["CANCELLED","DELIVERED"].includes(order.status))return res.status(409).json({message:"Payment proof cannot be changed for this order."});
-  const uploaded=await uploadPrivatePaymentProof(req.file,order.orderNumber);
-  const oldPublicId=order.paymentProofPublicId;
-  order.paymentUtr=parsed.data.utr?.toUpperCase()||"";
-  order.paymentProofPublicId=uploaded.publicId;
-  order.paymentStatus="PROOF_SUBMITTED";
-  order.paymentVerifiedAt=undefined;
-  order.paymentVerifiedBy=undefined;
-  try{
-    await order.save();
-  }catch(error){
-    await deletePrivatePaymentProof(uploaded.publicId);
-    throw error;
-  }
-  let warning;
-  if(oldPublicId){
-    try{
-      if(!await deletePrivatePaymentProof(oldPublicId))warning="The new proof is saved, but the previous private image could not be removed.";
-    }catch(error){console.error("Could not remove the previous private payment proof.",error);warning="The new proof is saved, but the previous private image could not be removed.";}
-  }
-  res.json({order:orderView(order),message:"Payment proof submitted for the store to verify.",warning});
-}
-export async function getBusinessPaymentProof(req,res){
-  const order=await Order.findOne({_id:req.params.id,businessId:req.tenantId}).select("+paymentProofPublicId");
-  if(!order)return res.status(404).json({message:"Order not found in your store."});
-  if(!order.paymentProofPublicId)return res.status(404).json({message:"No payment proof has been submitted."});
-  res.json({imageUrl:getPrivatePaymentProofUrl(order.paymentProofPublicId)});
-}
-export async function reviewBusinessPayment(req,res){
-  const parsed=z.object({status:z.enum(["VERIFIED","REJECTED"])}).safeParse(req.body);
-  if(!parsed.success)return res.status(400).json({message:validationMessage(parsed.error)});
-  const order=await Order.findOne({_id:req.params.id,businessId:req.tenantId});
-  if(!order)return res.status(404).json({message:"Order not found in your store."});
-  if(order.paymentStatus!=="PROOF_SUBMITTED")return res.status(409).json({message:"There is no payment proof waiting for verification."});
-  order.paymentStatus=parsed.data.status;
-  order.paymentVerifiedAt=new Date();
-  order.paymentVerifiedBy=req.user._id;
-  await order.save();
-  res.json({order:orderView(order)});
-}
-export async function createCustomerOrderMessage(req,res){
-  const order=await findCustomerOrder(req,res);
-  if(!order||res.headersSent)return;
-  await createMessage(order,{senderRole:"CUSTOMER",senderName:order.customerName,body:req.body.body},res);
-}
-export async function getBusinessOrderMessages(req,res){
-  const order=await Order.findOne({_id:req.params.id,businessId:req.tenantId});
-  if(!order)return res.status(404).json({message:"Order not found in your store."});
-  await listMessages(order,res);
-}
-export async function markBusinessOrderMessagesRead(req,res){
-  const order=await Order.findOne({_id:req.params.id,businessId:req.tenantId});
-  if(!order)return res.status(404).json({message:"Order not found in your store."});
-  await markMessagesRead(order,req,res,"BUSINESS_OWNER");
-}
-export async function createBusinessOrderMessage(req,res){
-  const order=await Order.findOne({_id:req.params.id,businessId:req.tenantId});
-  if(!order)return res.status(404).json({message:"Order not found in your store."});
-  await createMessage(order,{senderRole:"BUSINESS_OWNER",senderName:req.user.name,body:req.body.body},res);
 }
 export const customerOrderAccess=addTokenHeader;

@@ -105,7 +105,7 @@ test("Super Admin approval activates the requested plan and its default features
 
   assert.equal(res.statusCode,200);
   assert.equal(business.subscriptionPlan,"PRO");
-  assert.deepEqual(business.subscriptionFeatures,{advancedSeo:true,quickReplies:true,analytics:true});
+  assert.deepEqual(business.subscriptionFeatures,{advancedSeo:true,analytics:true});
   assert.equal(business.modifiedPath,"subscriptionFeatures");
   assert.equal(business.saved,true);
   assert.ok(business.subscriptionActivatedAt instanceof Date);

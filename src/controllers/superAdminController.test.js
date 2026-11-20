@@ -11,7 +11,7 @@ test("Super Admin can enable and disable analytics for an active Pro business",a
     _id:"000000000000000000000001",
     status:"ACTIVE",
     subscriptionPlan:"PRO",
-    subscriptionFeatures:{advancedSeo:false,quickReplies:false,analytics:false},
+    subscriptionFeatures:{advancedSeo:false,analytics:false},
     async save(){},
     markModified(){}
   };

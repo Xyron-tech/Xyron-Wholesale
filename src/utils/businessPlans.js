@@ -1,7 +1,7 @@
 export const BUSINESS_PLANS={
-  STARTER:{id:"STARTER",name:"Starter",monthlyPriceInr:199,maxProducts:25,maxSlides:3,features:{advancedSeo:false,quickReplies:false,analytics:false}},
-  GROWTH:{id:"GROWTH",name:"Growth",monthlyPriceInr:499,maxProducts:50,maxSlides:6,features:{advancedSeo:true,quickReplies:true,analytics:false}},
-  PRO:{id:"PRO",name:"Pro",monthlyPriceInr:999,maxProducts:null,maxSlides:6,features:{advancedSeo:true,quickReplies:true,analytics:true}}
+  STARTER:{id:"STARTER",name:"Starter",monthlyPriceInr:199,maxProducts:25,maxSlides:3,features:{advancedSeo:false,analytics:false}},
+  GROWTH:{id:"GROWTH",name:"Growth",monthlyPriceInr:499,maxProducts:50,maxSlides:6,features:{advancedSeo:true,analytics:false}},
+  PRO:{id:"PRO",name:"Pro",monthlyPriceInr:999,maxProducts:null,maxSlides:6,features:{advancedSeo:true,analytics:true}}
 };
 
 export const BUSINESS_FEATURES=Object.keys(BUSINESS_PLANS.STARTER.features);

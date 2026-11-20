@@ -8,6 +8,7 @@ import {findPincodeDetails} from "../services/pincodeDirectory.js";
 import {canAddProduct,canAddSlide,getPlan} from "../utils/businessPlans.js";
 import {uniqueBusinessSlug} from "../utils/slug.js";
 import {getBusinessPaymentMethod} from "../utils/businessPaymentMethod.js";
+import {createPaymentInfoSnapshot,hasPaymentInfoChanged} from "../utils/paymentInfoSnapshot.js";
 
 const optionalNumber=maximum=>z.preprocess(value=>value===""||value==null?undefined:value,z.coerce.number().positive().max(maximum).optional());
 const optionalInteger=maximum=>z.preprocess(value=>value===""||value==null?undefined:value,z.coerce.number().int().positive().max(maximum).optional());
@@ -68,6 +69,11 @@ const businessProfileFields=z.object({
   telegramUrl:z.string().trim().max(300).url().refine(value=>/^https?:\/\//i.test(value),"Social links must use http or https.").or(z.literal("")).optional().default(""),
   seoTitle:z.string().trim().max(70).optional().default(""),
   seoDescription:z.string().trim().max(180).optional().default(""),
+  minimumOrderWeightGrams:z.coerce.number().int().min(1).max(100000000).optional().default(1000),
+  minimumOrderDisplayMode:z.enum(["QUANTITY","WEIGHT"]).optional().default("WEIGHT"),
+  minimumOrderQuantityMessage:z.string().trim().max(180).optional().default("Add at least {remainingUnits} more {unitLabel} to place your order (minimum {minimumWeight})."),
+  minimumOrderWeightMessage:z.string().trim().max(180).optional().default("Add {remainingWeight} more to place your order (minimum {minimumWeight})."),
+  minimumOrderSliderText:z.string().trim().max(180).optional().default("Minimum order: {minimumWeight}"),
   removeLogo:z.boolean().optional().default(false)
 });
 const paymentSettingsFields=z.object({
@@ -89,17 +95,33 @@ const storeSectionsSchema=z.object({
   });
 });
 const shippingManagementFields=z.object({
+  deliveryRates:z.object({
+    localPaisa:z.coerce.number().int().min(0).max(100000000).nullable().optional(),
+    sameDistrictPaisa:z.coerce.number().int().min(0).max(100000000).nullable().optional(),
+    sameStatePaisa:z.coerce.number().int().min(0).max(100000000).nullable().optional(),
+    otherStatePaisa:z.coerce.number().int().min(0).max(100000000).nullable().optional()
+  }).optional(),
   deliveryRegions:z.array(z.object({
     _id:z.string().regex(/^[a-f\d]{24}$/i).optional(),
     name:z.string().trim().min(2).max(100),
-    ratePerKgPaisa:z.coerce.number().int().min(0).max(100000000)
+    ratePerKgPaisa:z.coerce.number().int().min(0).max(100000000),
+    matchType:z.enum(["PINCODE","DISTRICT","STATE","MANUAL"]).optional().default("MANUAL"),
+    pincode:z.string().regex(/^[1-9]\d{5}$/).or(z.literal("")).optional().default(""),
+    district:z.string().trim().max(100).optional().default(""),
+    state:z.string().trim().max(100).optional().default("")
   })).max(100)
 }).superRefine(({deliveryRegions},ctx)=>{
-  const names=new Set();
+  const names=new Set(),matches=new Set();
   deliveryRegions.forEach((region,index)=>{
     const key=region.name.toLocaleUpperCase("en-IN");
     if(names.has(key))ctx.addIssue({code:"custom",message:"Delivery region names must be unique.",path:["deliveryRegions",index,"name"]});
     names.add(key);
+    if(region.matchType==="PINCODE"&&!region.pincode)ctx.addIssue({code:"custom",message:"Enter the PIN code for this delivery rate.",path:["deliveryRegions",index,"pincode"]});
+    if(region.matchType==="DISTRICT"&&(!region.district||!region.state))ctx.addIssue({code:"custom",message:"Enter both the district and state for this delivery rate.",path:["deliveryRegions",index,"district"]});
+    if(region.matchType==="STATE"&&!region.state)ctx.addIssue({code:"custom",message:"Enter the state for this delivery rate.",path:["deliveryRegions",index,"state"]});
+    const matchKey=region.matchType==="PINCODE"?`PINCODE:${region.pincode}`:region.matchType==="DISTRICT"?`DISTRICT:${region.district.toLocaleUpperCase("en-IN")}:${region.state.toLocaleUpperCase("en-IN")}`:region.matchType==="STATE"?`STATE:${region.state.toLocaleUpperCase("en-IN")}`:"";
+    if(matchKey&&matches.has(matchKey))ctx.addIssue({code:"custom",message:"A delivery rate already exists for this PIN, district, or state.",path:["deliveryRegions",index,"matchType"]});
+    if(matchKey)matches.add(matchKey);
   });
 });
 
@@ -119,7 +141,7 @@ function storeAnnouncements(business){
 function safeBusiness(business){
   const plan=getPlan(business.subscriptionPlan);
   const paymentMethod=getBusinessPaymentMethod(business);
-  return {id:business._id,name:business.name,slug:business.slug,category:business.category,description:business.description,announcementTitle:business.announcementTitle||"",announcementText:business.announcementText||"",announcements:storeAnnouncements(business),storeSections:business.storeSections||[],logoUrl:business.logoUrl,contactPhone:business.contactPhone||"",whatsappNumber:business.whatsappNumber||"",instagramUrl:business.instagramUrl||"",youtubeUrl:business.youtubeUrl||"",facebookUrl:business.facebookUrl||"",linkedinUrl:business.linkedinUrl||"",twitterUrl:business.twitterUrl||"",telegramUrl:business.telegramUrl||"",seoTitle:business.seoTitle||"",seoDescription:business.seoDescription||"",upiId:business.upiId,paymentMethod,paymentInstructions:business.paymentInstructions,paymentQrUrl:business.paymentQrUrl,paymentQrEnabled:paymentMethod==="QR",address:business.address,city:business.city,state:business.state,pincode:business.pincode,deliveryRegions:business.deliveryRegions||[],status:business.status,subscriptionPlan:plan.id,subscriptionFeatures:business.subscriptionFeatures||{},planLimits:{maxProducts:plan.maxProducts,maxSlides:plan.maxSlides,monthlyPriceInr:plan.monthlyPriceInr},sliderSlides:business.sliderSlides};
+  return {id:business._id,name:business.name,slug:business.slug,category:business.category,description:business.description,announcementTitle:business.announcementTitle||"",announcementText:business.announcementText||"",announcements:storeAnnouncements(business),storeSections:business.storeSections||[],logoUrl:business.logoUrl,contactPhone:business.contactPhone||"",whatsappNumber:business.whatsappNumber||"",instagramUrl:business.instagramUrl||"",youtubeUrl:business.youtubeUrl||"",facebookUrl:business.facebookUrl||"",linkedinUrl:business.linkedinUrl||"",twitterUrl:business.twitterUrl||"",telegramUrl:business.telegramUrl||"",seoTitle:business.seoTitle||"",seoDescription:business.seoDescription||"",minimumOrderWeightGrams:business.minimumOrderWeightGrams||1000,minimumOrderDisplayMode:business.minimumOrderDisplayMode||"WEIGHT",minimumOrderQuantityMessage:business.minimumOrderQuantityMessage||"Add at least {remainingUnits} more {unitLabel} to place your order (minimum {minimumWeight}).",minimumOrderWeightMessage:business.minimumOrderWeightMessage||"Add {remainingWeight} more to place your order (minimum {minimumWeight}).",minimumOrderSliderText:business.minimumOrderSliderText||"Minimum order: {minimumWeight}",upiId:business.upiId,paymentMethod,paymentInstructions:business.paymentInstructions,paymentQrUrl:business.paymentQrUrl,paymentQrEnabled:paymentMethod==="QR",address:business.address,city:business.city,state:business.state,pincode:business.pincode,deliveryRates:business.deliveryRates||{},deliveryRegions:business.deliveryRegions||[],status:business.status,subscriptionPlan:plan.id,subscriptionFeatures:business.subscriptionFeatures||{},planLimits:{maxProducts:plan.maxProducts,maxSlides:plan.maxSlides,monthlyPriceInr:plan.monthlyPriceInr},sliderSlides:business.sliderSlides};
 }
 async function getOwnerBusiness(req){
   const business=await Business.findOne({_id:req.tenantId,ownerId:req.user._id,status:"ACTIVE"});
@@ -186,11 +208,13 @@ export async function updatePaymentSettings(req,res){
   if(!parsed.success)return res.status(400).json({message:validationError(parsed.error)});
   const business=await getOwnerBusiness(req);
   if(!business)return res.status(404).json({message:"Your approved business workspace was not found."});
+  const previousPaymentInfo=createPaymentInfoSnapshot(business);
   const paymentMethod=parsed.data.paymentMethod||(parsed.data.paymentQrEnabled===false?"OFF":"QR");
   if(paymentMethod==="GPAY"&&!parsed.data.upiId)return res.status(400).json({message:"Enter the GPay number or UPI ID customers should pay."});
   const image=req.file?await uploadStoreImage(req.file,business._id,"payment-qr"):null;
   const oldPublicId=business.paymentQrPublicId,oldQrUrl=business.paymentQrUrl;
   const removePaymentQr=parsed.data.removePaymentQr;
+  if(paymentMethod==="QR"&&!image&&(removePaymentQr||!oldQrUrl))return res.status(400).json({message:"Upload a payment QR before enabling QR payments."});
   const settings={...parsed.data};
   delete settings.removePaymentQr;
   delete settings.paymentMethod;
@@ -206,7 +230,29 @@ export async function updatePaymentSettings(req,res){
   }
   const qrStillUsed=oldPublicId&&await Order.exists({businessId:business._id,$or:[{paymentQrSnapshotPublicId:oldPublicId},{paymentQrSnapshot:oldQrUrl}]});
   const previousImageRemoved=(image||removePaymentQr)&&oldPublicId&&!qrStillUsed?await removeOldImage(oldPublicId):true;
-  res.json({business:safeBusiness(business),message:"Payment and delivery settings saved.",warning:previousImageRemoved?undefined:"Settings are saved, but Cloudinary could not remove the previous QR image."});
+  const paymentInfoSnapshot=createPaymentInfoSnapshot(business);
+  let notifiedOrders=0;
+  if(hasPaymentInfoChanged(previousPaymentInfo,paymentInfoSnapshot)){
+    const alertSnapshot=paymentInfoSnapshot?{...paymentInfoSnapshot,notifiedAt:new Date()}:null;
+    const result=await Order.updateMany({
+      businessId:business._id,
+      customerId:{$ne:null},
+      businessArchivedAt:null,
+      customerArchivedAt:null,
+      status:{$in:["PLACED","ACCEPTED"]},
+      paymentStatus:{$in:["UNPAID","REJECTED"]}
+    },{
+      $set:{paymentInfoSnapshot:alertSnapshot},
+      $inc:{unreadCustomerOrderUpdates:1}
+    });
+    notifiedOrders=result.modifiedCount||0;
+  }
+  const warnings=[];
+  if(!previousImageRemoved)warnings.push("Settings are saved, but Cloudinary could not remove the previous QR image.");
+  const message=notifiedOrders
+    ?`Payment settings saved. Updated payment details were sent to ${notifiedOrders} open order${notifiedOrders===1?"":"s"}.`
+    :"Payment settings saved.";
+  res.json({business:safeBusiness(business),message,warning:warnings.length?warnings.join(" "):undefined});
 }
 
 export async function updateShippingSettings(req,res){
@@ -215,6 +261,7 @@ export async function updateShippingSettings(req,res){
   if(!parsed.success)return res.status(400).json({message:validationError(parsed.error)});
   const business=await getOwnerBusiness(req);
   if(!business)return res.status(404).json({message:"Your approved business workspace was not found."});
+  if(parsed.data.deliveryRates)business.deliveryRates=parsed.data.deliveryRates;
   business.deliveryRegions=parsed.data.deliveryRegions;
   await business.save();
   res.json({business:safeBusiness(business),message:"Delivery regions saved."});
@@ -304,6 +351,19 @@ export async function updateProduct(req,res){
   res.json({product,message:"Product updated.",warning:previousImageRemoved?undefined:"Product updated, but Cloudinary could not remove the previous image."});
 }
 
+export async function setProductFeatured(req,res){
+  if(!mongoose.isValidObjectId(req.params.id))return res.status(400).json({message:"Invalid product ID."});
+  const parsed=z.object({isFeatured:z.boolean()}).strict().safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({message:validationError(parsed.error)});
+  const business=await getOwnerBusiness(req);
+  if(!business)return res.status(404).json({message:"Your approved business workspace was not found."});
+  const product=await Product.findOne({_id:req.params.id,businessId:business._id});
+  if(!product)return res.status(404).json({message:"Product not found in your store."});
+  product.isFeatured=parsed.data.isFeatured;
+  await product.save();
+  res.json({product,message:product.isFeatured?"Product added to storefront favorites.":"Product removed from storefront favorites."});
+}
+
 export async function deleteProduct(req,res){
   if(!mongoose.isValidObjectId(req.params.id))return res.status(400).json({message:"Invalid product ID."});
   const business=await getOwnerBusiness(req);
@@ -388,12 +448,13 @@ export async function getPublicProducts(req,res){
   const search=String(req.query.search||"").trim().slice(0,80);
   const category=String(req.query.category||"").trim().slice(0,80);
   const filter={businessId:business._id,status:"ACTIVE"};
+  if(String(req.query.featuredOnly||"")==="true")filter.isFeatured=true;
   if(search){
     const safeSearch=search.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
     filter.$or=[{name:{$regex:safeSearch,$options:"i"}},{category:{$regex:safeSearch,$options:"i"}},{description:{$regex:safeSearch,$options:"i"}}];
   }
   if(category)filter.category=category;
-  const products=await Product.find(filter).select("name description category weightCalculationMethod piecesPerBundle bundleWeightGrams piecesPerKg piecesPerPacket packetWeightGrams packetPrice stockPackets imageUrl").sort({createdAt:-1}).limit(100).lean();
+  const products=await Product.find(filter).select("name description category weightCalculationMethod piecesPerBundle bundleWeightGrams piecesPerKg piecesPerPacket packetWeightGrams packetPrice stockPackets imageUrl isFeatured").sort({createdAt:-1}).limit(100).lean();
   const categories=await Product.distinct("category",{businessId:business._id,status:"ACTIVE"});
   res.json({products,categories:categories.sort((a,b)=>a.localeCompare(b)),count:products.length});
 }

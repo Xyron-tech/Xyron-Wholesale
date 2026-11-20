@@ -15,10 +15,12 @@ const schema=new mongoose.Schema({
   stockPackets:{type:Number,required:true,min:0},
   imageUrl:{type:String,default:""},
   imagePublicId:{type:String,default:""},
+  isFeatured:{type:Boolean,default:false},
   status:{type:String,enum:["ACTIVE","INACTIVE"],default:"ACTIVE",index:true}
 },{timestamps:true});
 
 schema.index({businessId:1,status:1,category:1});
+schema.index({businessId:1,status:1,isFeatured:1,createdAt:-1});
 schema.index({businessId:1,name:1},{unique:true});
 
 export default mongoose.model("Product",schema);

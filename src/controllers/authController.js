@@ -1,9 +1,63 @@
 import bcrypt from "bcryptjs";import jwt from "jsonwebtoken";import {z} from "zod";import User from "../models/User.js";import Business from "../models/Business.js";import BusinessApplication from "../models/BusinessApplication.js";import {env} from "../config/env.js";import {uniqueBusinessSlug} from "../utils/slug.js";
-const registerSchema=z.object({ownerName:z.string().trim().min(2).max(100),email:z.string().trim().email().max(160),phone:z.string().trim().min(8).max(20),password:z.string().min(10).max(100),confirmPassword:z.string().min(10).max(100),businessName:z.string().trim().min(2).max(140),category:z.string().trim().min(2).max(80),description:z.string().trim().max(1200).optional().default(""),address:z.string().trim().min(5).max(240),city:z.string().trim().min(2).max(80),state:z.string().trim().min(2).max(80),pincode:z.string().regex(/^\d{6}$/),selectedPlan:z.enum(["STARTER","GROWTH","PRO"]).default("STARTER")}).refine(value=>value.password===value.confirmPassword,{path:["confirmPassword"],message:"Passwords do not match."});
+const optionalRatePerKg=z.preprocess(value=>value===""||value==null?undefined:value,z.coerce.number().min(0).max(1000000).transform(value=>Math.round(value*100)).optional());
+const registerSchema=z.object({
+  ownerName:z.string().trim().min(2).max(100),
+  email:z.string().trim().email().max(160),
+  phone:z.string().trim().min(8).max(20),
+  password:z.string().min(10).max(100),
+  confirmPassword:z.string().min(10).max(100),
+  businessName:z.string().trim().min(2).max(140),
+  category:z.string().trim().min(2).max(80),
+  description:z.string().trim().max(1200).optional().default(""),
+  address:z.string().trim().min(5).max(240),
+  city:z.string().trim().min(2).max(80),
+  state:z.string().trim().min(2).max(80),
+  pincode:z.string().regex(/^\d{6}$/),
+  localRatePerKg:optionalRatePerKg,
+  sameDistrictRatePerKg:optionalRatePerKg,
+  sameStateRatePerKg:optionalRatePerKg,
+  otherStateRatePerKg:optionalRatePerKg,
+  selectedPlan:z.enum(["STARTER","GROWTH","PRO"]).default("STARTER")
+}).refine(value=>value.password===value.confirmPassword,{path:["confirmPassword"],message:"Passwords do not match."})
+  .transform(value=>({
+    ...value,
+    deliveryRates:{
+      ...(value.localRatePerKg!==undefined?{localPaisa:value.localRatePerKg}:{}),
+      ...(value.sameDistrictRatePerKg!==undefined?{sameDistrictPaisa:value.sameDistrictRatePerKg}:{}),
+      ...(value.sameStateRatePerKg!==undefined?{sameStatePaisa:value.sameStateRatePerKg}:{}),
+      ...(value.otherStateRatePerKg!==undefined?{otherStatePaisa:value.otherStateRatePerKg}:{})
+    }
+  }));
 const loginSchema=z.object({email:z.string().email(),password:z.string().min(1).max(100)});
 function setSession(res,id,sessionVersion=0){const token=jwt.sign({sub:id.toString(),sessionVersion},env.JWT_SECRET,{expiresIn:env.JWT_EXPIRES_IN});res.cookie("xyron_session",token,{httpOnly:true,secure:env.NODE_ENV==="production",sameSite:"lax",maxAge:8*60*60*1000,path:"/"});}
 const safeUser=u=>({id:u._id,name:u.name,email:u.email,phone:u.phone,role:u.role,accountStatus:u.accountStatus,businessId:u.businessId});
-export async function registerBusiness(req,res){const parsed=registerSchema.safeParse(req.body);if(!parsed.success)return res.status(400).json({message:parsed.error.issues[0]?.message||"Invalid application details."});const d=parsed.data,email=d.email.toLowerCase();if(await User.exists({email}))return res.status(409).json({message:"An account with this email already exists."});const passwordHash=await bcrypt.hash(d.password,12);const user=await User.create({name:d.ownerName,email,phone:d.phone,passwordHash,role:"BUSINESS_OWNER",accountStatus:"PENDING"});try{const slug=await uniqueBusinessSlug(d.businessName);const business=await Business.create({name:d.businessName,slug,category:d.category,description:d.description,ownerId:user._id,status:"PENDING",subscriptionPlan:d.selectedPlan,address:d.address,city:d.city,state:d.state,pincode:d.pincode});user.businessId=business._id;await user.save();await BusinessApplication.create({ownerId:user._id,businessId:business._id,ownerName:d.ownerName,email,phone:d.phone,businessName:d.businessName,category:d.category,description:d.description,address:d.address,city:d.city,state:d.state,pincode:d.pincode,selectedPlan:d.selectedPlan});}catch(e){await User.deleteOne({_id:user._id});throw e;}res.status(201).json({message:"Application submitted. Access begins after Super Admin approval."});}
+export async function registerBusiness(req,res){
+  const parsed=registerSchema.safeParse(req.body);
+  if(!parsed.success)return res.status(400).json({message:parsed.error.issues[0]?.message||"Invalid application details."});
+  const d=parsed.data,email=d.email.toLowerCase();
+  if(await User.exists({email}))return res.status(409).json({message:"An account with this email already exists."});
+  const passwordHash=await bcrypt.hash(d.password,12);
+  const user=await User.create({name:d.ownerName,email,phone:d.phone,passwordHash,role:"BUSINESS_OWNER",accountStatus:"PENDING"});
+  try{
+    const slug=await uniqueBusinessSlug(d.businessName);
+    const business=await Business.create({
+      name:d.businessName,slug,category:d.category,description:d.description,ownerId:user._id,
+      status:"PENDING",subscriptionPlan:d.selectedPlan,address:d.address,city:d.city,state:d.state,
+      pincode:d.pincode,contactPhone:d.phone,deliveryRates:d.deliveryRates
+    });
+    user.businessId=business._id;
+    await user.save();
+    await BusinessApplication.create({
+      ownerId:user._id,businessId:business._id,ownerName:d.ownerName,email,phone:d.phone,
+      businessName:d.businessName,category:d.category,description:d.description,address:d.address,
+      city:d.city,state:d.state,pincode:d.pincode,selectedPlan:d.selectedPlan
+    });
+  }catch(error){
+    await User.deleteOne({_id:user._id});
+    throw error;
+  }
+  res.status(201).json({message:"Application submitted. Access begins after Super Admin approval."});
+}
 export async function login(req,res){const p=loginSchema.safeParse(req.body);if(!p.success)return res.status(400).json({message:"Enter a valid email and password."});const u=await User.findOne({email:p.data.email.toLowerCase()}).select("+passwordHash");if(!u||!(await bcrypt.compare(p.data.password,u.passwordHash)))return res.status(401).json({message:"Email or password is incorrect."});if(["REJECTED","SUSPENDED"].includes(u.accountStatus))return res.status(403).json({message:"This account is unavailable."});u.lastLoginAt=new Date();await u.save();setSession(res,u._id,u.sessionVersion||0);res.json({user:safeUser(u)});}
 export async function me(req,res){res.json({user:req.user?safeUser(req.user):null});}
 const profileSchema=z.object({name:z.string().trim().min(2).max(100),email:z.string().trim().email().max(160).transform(value=>value.toLowerCase()),phone:z.string().trim().min(8).max(20),currentPassword:z.string().min(1).max(100),newPassword:z.string().max(100).optional().default(""),confirmNewPassword:z.string().max(100).optional().default("")}).refine(value=>!value.newPassword||value.newPassword.length>=10,{path:["newPassword"],message:"A new password must be at least 10 characters."}).refine(value=>value.newPassword===value.confirmNewPassword,{path:["confirmNewPassword"],message:"New passwords do not match."});
